@@ -1,0 +1,11 @@
+build/
+install/
+log/
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+*.pt
+*.db3
+*.bag

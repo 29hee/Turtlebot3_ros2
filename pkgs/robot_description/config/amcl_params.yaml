@@ -1,0 +1,36 @@
+amcl:
+  ros__parameters:
+    # 1. 파티클 설정
+    min_particles: 500              # 최소 파티클 수
+    max_particles: 2000             # 최대 파티클 수
+    pf_err: 0.05                    # KLD 오차 기준
+    pf_z: 0.99                      # KLD 확률 밀도
+    recovery_alpha_slow: 0.001      # 느린 복구 속도 (0.0은 비활성)
+    recovery_alpha_fast: 0.1        # 빠른 복구 속도 (0.0은 비활성)
+
+    # 2. 모션 모델 설정 (차동 구동형)
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    alpha1: 0.2                     # 회전->회전 노이즈
+    alpha2: 0.2                     # 이동->회전 노이즈
+    alpha3: 0.2                     # 이동->이동 노이즈
+    alpha4: 0.2                     # 회전->이동 노이즈
+    
+    # 3. 센서 모델 설정
+    laser_model_type: "likelihood_field"
+    laser_min_range: -1.0           # 센서 스펙 최소값 사용
+    laser_max_range: -1.0           # 센서 스펙 최대값 사용
+    laser_likelihood_max_dist: 2.0  # 장애물 영향 범위
+    z_hit: 0.5                      # 실제 매칭 가중치
+    z_rand: 0.5                     # 무작위 노이즈 가중치
+    z_short: 0.05                   # 가려진 물체 가중치
+    z_max: 0.05                     # 최대 거리 가중치
+
+    # 4. 업데이트 주기
+    update_min_d: 0.25              # 25cm 이동 시마다 계산
+    update_min_a: 0.2               # 약 11.5도 회전 시마다 계산
+
+    # 5. 프레임 설정
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    global_frame_id: "map"
+    tf_broadcast: true              # map -> odom 변환 발행

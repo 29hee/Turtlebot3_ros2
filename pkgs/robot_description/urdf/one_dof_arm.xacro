@@ -1,0 +1,139 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="one_dof_arm">
+
+  <!-- Arguments -->
+  <xacro:arg name="payload_mass" default="1.0"/>
+
+  <!-- ===== WORLD LINK ===== -->
+  <link name="world"/>
+
+  <!-- ===== WORLD TO BASE JOINT ===== -->
+  <joint name="world_to_base" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 3.14159"/>
+  </joint>
+
+  <!-- ===== BASE LINK ===== -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.1" length="0.2"/>
+      </geometry>
+      <material name="grey">
+        <color rgba="0.5 0.5 0.5 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.1" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.1" length="0.2"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.1" rpy="1.5708 0 0"/>
+      <mass value="5.0"/>
+      <inertia ixx="0.02916" iyy="0.02916" izz="0.025" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ===== ARM JOINT ===== -->
+  <joint name="arm_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="arm_link"/>
+    <origin xyz="0 0.125 0.1" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="100.0" velocity="10.0"/>
+    <dynamics damping="0.1" friction="0.1"/>
+  </joint>
+
+  <!-- ===== ARM LINK ===== -->
+  <link name="arm_link">
+    <visual>
+      <origin xyz="0.5 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="1.0 0.05 0.05"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.4 0.8 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.5 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="1.0 0.05 0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0.5 0 0" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.00042" iyy="0.08354" izz="0.08354" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ===== PAYLOAD JOINT ===== -->
+  <joint name="payload_joint" type="fixed">
+    <parent link="arm_link"/>
+    <child link="payload_link"/>
+    <origin xyz="1.0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== PAYLOAD LINK ===== -->
+  <link name="payload_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.8 0.2 0.2 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="$(arg payload_mass)"/>
+      <inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </link>
+
+  <!-- ===== ROS2 Control Hardware ===== -->
+  <ros2_control name="GazeboSystem" type="system">
+    <hardware>
+      <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+    </hardware>
+    <joint name="arm_joint">
+      <command_interface name="effort"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+  <!-- ===== Gazebo ROS2 Control Plugin ===== -->
+  <gazebo>
+    <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
+      <parameters>$(find robot_description)/config/arm_controllers.yaml</parameters>
+      <robot_param>robot_description</robot_param>
+      <robot_param_node>robot_state_publisher</robot_param_node>
+      <hold_joints>false</hold_joints>
+    </plugin>
+  </gazebo>
+
+  <!-- ===== Gazebo Materials (color) ===== -->
+  <gazebo reference="base_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+  <gazebo reference="arm_link">
+    <material>Gazebo/Blue</material>
+  </gazebo>
+  <gazebo reference="payload_link">
+    <material>Gazebo/Red</material>
+  </gazebo>
+
+</robot>
