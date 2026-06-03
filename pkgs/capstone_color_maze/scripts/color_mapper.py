@@ -44,6 +44,12 @@ from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 
 
+def default_landmarks_path():
+    """이 스크립트 기준 ../maps/color_landmarks.yaml (하드코딩 경로 제거)."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.join(os.path.dirname(here), 'maps', 'color_landmarks.yaml')
+
+
 # ── HSV 색 범위 (color_detector 와 동일) ─────────────────────────────────────
 COLOR_RANGES = {
     'RED':   [((0, 100, 70),   (10, 255, 255)),
@@ -81,8 +87,7 @@ class ColorMapper(Node):
         self.declare_parameter('max_range', 1.5)       # 유효 정면거리 상한 [m]
         self.declare_parameter('grid_res', 0.30)       # 격자 한 변 [m] (스냅 단위)
         self.declare_parameter('min_votes', 5)         # 이 득표 이상인 칸만 최종 채택
-        self.declare_parameter('save_path',
-            '/home/user/workspace/ros2_project/capstone_color_maze/maps/color_landmarks.yaml')
+        self.declare_parameter('save_path', default_landmarks_path())
         self.declare_parameter('save_period', 3.0)
 
         self.image_topic = self.get_parameter('image_topic').value

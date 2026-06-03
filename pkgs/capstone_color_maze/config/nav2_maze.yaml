@@ -38,6 +38,14 @@ amcl:
     z_rand: 0.5
     z_short: 0.05
     scan_topic: scan
+    # 런타임 시작 시 로봇은 방 빈 코너 (-2.0,-2.0) 에 있다고 가정하고 AMCL 초기화.
+    # (이게 없으면 AMCL 이 (0,0) 으로 추정해 첫 주행이 어긋난다.)
+    set_initial_pose: true
+    initial_pose:
+      x: -2.0
+      y: -2.0
+      z: 0.0
+      yaw: 0.0
 
 amcl_map_client:
   ros__parameters:

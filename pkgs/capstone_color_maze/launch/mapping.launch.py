@@ -17,19 +17,26 @@ color_maze.world 에서 TurtleBot3 로 SLAM(slam_toolbox) 매핑.
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import (
+    IncludeLaunchDescription, DeclareLaunchArgument, ExecuteProcess,
+)
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
 
 
 def generate_launch_description():
     here = os.path.dirname(os.path.realpath(__file__))
-    world = os.path.join(os.path.dirname(here), 'worlds', 'color_maze.world')
+    pkg = os.path.dirname(here)
+    world = os.path.join(pkg, 'worlds', 'color_room.world')
+    wall_follower = os.path.join(pkg, 'scripts', 'wall_follower.py')
+    color_mapper = os.path.join(pkg, 'scripts', 'color_mapper.py')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
-    x_pose = LaunchConfiguration('x_pose', default='-1.5')
-    y_pose = LaunchConfiguration('y_pose', default='-1.5')
+    x_pose = LaunchConfiguration('x_pose', default='-2.0')
+    y_pose = LaunchConfiguration('y_pose', default='-2.0')
+    explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
+    duration = LaunchConfiguration('duration', default='180')
 
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
@@ -58,8 +65,23 @@ def generate_launch_description():
         launch_arguments={'use_sim_time': use_sim_time}.items(),
     )
 
+    # 자율 탐색(오른손 벽타기) + 색 라벨 누적(격자 투표 → color_landmarks.yaml)
+    wf_proc = ExecuteProcess(
+        cmd=['python3', wall_follower, '--duration', duration],
+        condition=IfCondition(explore), output='screen',
+    )
+    mapper_proc = ExecuteProcess(
+        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(explore), output='screen',
+    )
+
     return LaunchDescription([
-        DeclareLaunchArgument('x_pose', default_value='-1.5'),
-        DeclareLaunchArgument('y_pose', default_value='-1.5'),
+        DeclareLaunchArgument('x_pose', default_value='-2.0'),
+        DeclareLaunchArgument('y_pose', default_value='-2.0'),
+        DeclareLaunchArgument('explore', default_value='true',
+                              description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
+        DeclareLaunchArgument('duration', default_value='180',
+                              description='wall_follower 자율주행 시간[s]'),
         gzserver, gzclient, rsp, spawn, slam,
+        wf_proc, mapper_proc,
     ])

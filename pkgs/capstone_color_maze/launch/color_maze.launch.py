@@ -24,11 +24,11 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # 이 런치 파일과 같은 트리의 worlds/color_maze.world 를 사용
     here = os.path.dirname(os.path.realpath(__file__))
-    world = os.path.join(os.path.dirname(here), 'worlds', 'color_maze.world')
+    world = os.path.join(os.path.dirname(here), 'worlds', 'color_room.world')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
-    x_pose = LaunchConfiguration('x_pose', default='-1.5')
-    y_pose = LaunchConfiguration('y_pose', default='-1.5')
+    x_pose = LaunchConfiguration('x_pose', default='-2.0')
+    y_pose = LaunchConfiguration('y_pose', default='-2.0')
 
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
@@ -53,8 +53,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('x_pose', default_value='-1.5'),
-        DeclareLaunchArgument('y_pose', default_value='-1.5'),
+        DeclareLaunchArgument('x_pose', default_value='-2.0'),
+        DeclareLaunchArgument('y_pose', default_value='-2.0'),
         gzserver,
         gzclient,
         robot_state_publisher,

@@ -1,0 +1,234 @@
+<?xml version="1.0" ?>
+<!-- 자동 생성: generate_world.py — 흰벽 5x5m 방 + RGB 단색 패널 9개 + 무채색 장애물 -->
+<sdf version="1.6">
+  <world name="color_room">
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+    <scene>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.8 0.8 0.8 1</background>
+      <shadows>false</shadows>
+    </scene>
+    <physics type="ode">
+      <real_time_update_rate>1000</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+    </physics>
+
+    <model name="wall_bottom">
+      <static>true</static>
+      <pose>0.0 -2.5 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>5.15 0.15 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>5.15 0.15 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_top">
+      <static>true</static>
+      <pose>0.0 2.5 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>5.15 0.15 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>5.15 0.15 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_left">
+      <static>true</static>
+      <pose>-2.5 0.0 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 5.15 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.15 5.15 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_right">
+      <static>true</static>
+      <pose>2.5 0.0 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 5.15 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.15 5.15 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_red_b">
+      <static>true</static>
+      <pose>-1.500 -2.405 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.0 0.04 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.0 0.04 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_green_b">
+      <static>true</static>
+      <pose>0.000 -2.405 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.0 0.04 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.0 0.04 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_blue_b">
+      <static>true</static>
+      <pose>1.500 -2.405 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.0 0.04 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.0 0.04 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_green_r">
+      <static>true</static>
+      <pose>2.405 -1.200 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.04 1.0 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.04 1.0 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_red_r">
+      <static>true</static>
+      <pose>2.405 1.200 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.04 1.0 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.04 1.0 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_blue_t">
+      <static>true</static>
+      <pose>-1.500 2.405 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.0 0.04 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.0 0.04 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_green_t">
+      <static>true</static>
+      <pose>1.000 2.405 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.0 0.04 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.0 0.04 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_blue_l">
+      <static>true</static>
+      <pose>-2.405 -1.000 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.04 1.0 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.04 1.0 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="p_red_l">
+      <static>true</static>
+      <pose>-2.405 0.800 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.04 1.0 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.04 1.0 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obs_cyl_a">
+      <static>true</static>
+      <pose>-0.8 0.6 0.300 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.18</radius><length>0.6</length></cylinder></geometry></collision>
+        <visual name="v">
+          <geometry><cylinder><radius>0.18</radius><length>0.6</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obs_box_a">
+      <static>true</static>
+      <pose>1.0 -0.7 0.300 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 0.3 0.6</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.3 0.3 0.6</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obs_cyl_b">
+      <static>true</static>
+      <pose>0.9 1.1 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.15</radius><length>0.5</length></cylinder></geometry></collision>
+        <visual name="v">
+          <geometry><cylinder><radius>0.15</radius><length>0.5</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obs_box_b">
+      <static>true</static>
+      <pose>-1.2 -1.0 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.25 0.5 0.5</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.25 0.5 0.5</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obs_cyl_c">
+      <static>true</static>
+      <pose>0.3 -0.4 0.225 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.12</radius><length>0.45</length></cylinder></geometry></collision>
+        <visual name="v">
+          <geometry><cylinder><radius>0.12</radius><length>0.45</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
