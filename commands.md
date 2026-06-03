@@ -269,7 +269,7 @@ ros2 interface show nav2_msgs/action/NavigateToPose
 
 ```bash
 # Python 패키지
-cd ~/workspace/turtle_project/pkgs
+cd ~/workspace/co_project/pkgs
 ros2 pkg create --build-type ament_python --node-name 노드이름 패키지이름
 
 # C++ 패키지
@@ -278,6 +278,46 @@ ros2 pkg create --build-type ament_cmake 패키지이름
 # 커스텀 인터페이스 패키지 (msg/srv/action)
 ros2 pkg create --build-type ament_cmake 패키지이름_interfaces
 ```
+
+---
+
+
+## 🎨 미술관 휠체어 (capstone_color_maze) 실행
+
+> 새 launch는 패키지(package.xml) 미등록 → **파일 경로로 직접 실행**. 아래 명령은 모두 `capstone_color_maze/` 디렉터리에서 실행.
+
+### 0) 초기 source (새 터미널마다)
+```bash
+export TURTLEBOT3_MODEL=burger_cam                  # 표준 burger엔 카메라 없음 → 반드시 burger_cam
+source /opt/ros/humble/setup.bash
+source ~/turtlebot3_ws/install/setup.bash           # ← 본인 turtlebot3 워크스페이스 경로로 수정
+export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:$(ros2 pkg prefix turtlebot3_gazebo)/share/turtlebot3_gazebo/models
+cd <클론경로>/co_project/pkgs/capstone_color_maze   # ← 본인 클론 경로로 수정
+```
+
+### 1) 매핑 모드 — 색맵 구축 (개관 전 큐레이션)
+```bash
+ros2 launch launch/mapping.launch.py                          # gazebo(color_room)+SLAM+탐사+색매핑
+ros2 run nav2_map_server map_saver_cli -f maps/color_room     # 점유격자맵 저장 (별도 터미널, 방 충분히 돈 뒤)
+# color_landmarks.yaml 은 자동 누적. 필터 결과 확인:
+python3 -c "import sys;sys.path.insert(0,'scripts');import yaml;from maze_common import resolve_target_walls;d=yaml.safe_load(open('maps/color_landmarks.yaml'));[print(c,len(resolve_target_walls(d,c)),'개') for c in('RED','GREEN','BLUE')]"
+```
+
+### 2) 서비스 모드 — 색 안내 주행 (개관 중)
+```bash
+ros2 launch launch/runtime.launch.py \
+  target_color:=RED start_gazebo:=true \
+  map:=$(pwd)/maps/color_room.yaml
+# 확인: ros2 lifecycle get /amcl   → active [3]
+# 정합 안 맞으면(라이다가 벽에 안 붙으면) RViz "2D Pose Estimate"로 로봇 위치 지정
+# 색 변경 시: runtime 을 그 색으로 통째로 재실행 (maze_tour·color_confirm 자동 일치)
+```
+
+### 3) 전부 종료 (좀비 프로세스 정리)
+```bash
+for p in '[g]zserver' '[g]zclient' '[g]azebo' '[s]lam_toolbox' '[c]ontroller_server' '[p]lanner_server' '[b]t_navigator' '[b]ehavior_server' '[s]moother_server' '[v]elocity_smoother' '[w]aypoint_follower' '[l]ifecycle_manager' '[m]ap_server' '[a]mcl' '[r]obot_state_publisher' '[r]viz2' '[w]all_follower' '[c]olor_mapper' '[m]aze_tour' '[c]olor_confirm'; do pkill -9 -f "$p"; done; ros2 daemon stop; ros2 daemon start
+```
+
 
 ---
 
