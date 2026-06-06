@@ -31,6 +31,7 @@ import os
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
+from rclpy.qos import qos_profile_sensor_data
 
 import numpy as np
 import cv2
@@ -43,6 +44,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 import tf2_ros
 
+from maze_common import COLOR_RANGES   # HSV 색 범위 단일 출처
+
 
 def default_landmarks_path():
     """이 스크립트 기준 ../maps/color_landmarks.yaml (하드코딩 경로 제거)."""
@@ -50,13 +53,7 @@ def default_landmarks_path():
     return os.path.join(os.path.dirname(here), 'maps', 'color_landmarks.yaml')
 
 
-# ── HSV 색 범위 (color_detector 와 동일) ─────────────────────────────────────
-COLOR_RANGES = {
-    'RED':   [((0, 100, 70),   (10, 255, 255)),
-              ((170, 100, 70), (179, 255, 255))],
-    'GREEN': [((40, 80, 50),   (85, 255, 255))],
-    'BLUE':  [((100, 120, 50), (130, 255, 255))],
-}
+# ── 마커 색 (HSV 색 범위 COLOR_RANGES 는 maze_common 에서 import) ─────────────
 MARKER_RGB = {'RED': (1.0, 0.0, 0.0), 'GREEN': (0.0, 1.0, 0.0), 'BLUE': (0.0, 0.3, 1.0)}
 
 
@@ -82,9 +79,15 @@ class ColorMapper(Node):
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('roi_ratio', 0.4)       # 중앙 ROI 비율
-        self.declare_parameter('min_ratio', 0.10)      # 검출 인정 ROI 색 비율
+        # 검출 인정 ROI 색 비율. 1.0m 패널은 2.5m 거리에서 ROI의 ~9%로 떨어지므로, 방
+        # 중앙(0,0)에서 2.5m 떨어진 벽까지 잡으려면 0.10 은 너무 빡빡 → 0.07 로 완화.
+        # (grid-voting + min_votes + maze_common 클러스터 필터가 노이즈를 거르므로 안전.)
+        self.declare_parameter('min_ratio', 0.07)
         self.declare_parameter('min_range', 0.12)      # 유효 정면거리 하한 [m]
-        self.declare_parameter('max_range', 1.5)       # 유효 정면거리 상한 [m]
+        # 유효 정면거리 상한 [m]. 방이 5×5라 중앙에서 벽까지 2.5m → max_range 가 2.0 이면
+        # 중앙/내부 스핀으로 어느 벽도 못 잡는다. 2.6 으로 올려 한 번의 스핀에서 마주보는
+        # 벽을 거리와 무관하게 기록(라이다는 3.5m까지 유효). min_ratio 완화와 짝을 이룬다.
+        self.declare_parameter('max_range', 2.6)
         self.declare_parameter('grid_res', 0.30)       # 격자 한 변 [m] (스냅 단위)
         self.declare_parameter('min_votes', 5)         # 이 득표 이상인 칸만 최종 채택
         self.declare_parameter('save_path', default_landmarks_path())
@@ -113,8 +116,8 @@ class ColorMapper(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # I/O
-        self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
-        self.create_subscription(Image, self.image_topic, self.image_cb, 5)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
+        self.create_subscription(Image, self.image_topic, self.image_cb, qos_profile_sensor_data)
         self.pub_color = self.create_publisher(String, '/detected_color', 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/color_landmarks', 10)
         self.create_timer(self.save_period, self.save_cb)
@@ -197,7 +200,7 @@ class ColorMapper(Node):
 
     def vote(self, color, x, y):
         key = self.cell_of(x, y)
-        cell = self.votes.setdefault(key, {'RED': 0, 'GREEN': 0, 'BLUE': 0})
+        cell = self.votes.setdefault(key, {c: 0 for c in COLOR_RANGES})
         cell[color] += 1
         self.publish_markers()
 

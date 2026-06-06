@@ -14,18 +14,32 @@ maze_common.py
 import math
 
 # ── HSV 색 범위 (OpenCV: H 0~179, S 0~255, V 0~255) ──────────────────────────
-# Gazebo/Red·Green·Blue 순색 기준. color_detector.py 와 동일해야 한다(단일 출처).
+# 단일 출처(single source). color_detector / color_confirm / color_mapper 가 모두
+# 여기서 import 한다 — 값 drift 방지.
+#
+# 실물 미로 기준 튜닝: 색 벽은 R/G/B 만, 나머지 벽은 '흰색'.
+#   · Hue 는 R/G/B 가 ~120° 간격이라 겹칠 일이 적음 → 각 색 중심 ±소폭으로 좁게.
+#   · S_min 이 '흰 벽/허연 반사와 색 벽을 가르는' 핵심. 너무 낮으면 흐릿한 색·글레어
+#     가장자리까지 잡힘 → 100~110 으로 올려 '진한 색만' 통과시킨다.
+#   · V_min 은 그림자/어두운 면 노이즈 컷(60~70).
+# 조명/카메라가 바뀌면 color_detector.py(-p show:=true)로 마스크 보며 S_min 부터 재보정.
 COLOR_RANGES = {
-    'RED':   [((0, 100, 70),   (10, 255, 255)),
-              ((170, 100, 70), (179, 255, 255))],
-    'GREEN': [((40, 80, 50),   (85, 255, 255))],
-    'BLUE':  [((100, 120, 50), (130, 255, 255))],
+    # 빨강은 Hue 가 0 부근에서 끊겨 양끝 두 구간을 OR.
+    'RED':   [((0,   110, 70),  (10,  255, 255)),
+             ((170, 110, 70),  (179, 255, 255))],
+    'GREEN': [((40,  90,  60),  (80,  255, 255))],
+    'BLUE':  [((100, 110, 60),  (128, 255, 255))],
 }
 
 VALID_COLORS = ('RED', 'GREEN', 'BLUE')
 
-# 사양: "target-color HSV mask must cover at least 60% of the camera frame"
-CONFIRM_THRESHOLD = 0.60
+# 사양 목표: "target-color HSV mask must cover at least 60% of the camera frame".
+# 현재값 = 0.30 (임시). burger_cam 은 fov 약 182° 초광각이라 작품을 정면에서 봐도
+# 프레임 점유율이 낮아 60%에 도달하지 못한다 → 우선 30%로 통일해 파이프라인을 굴린다.
+# ⚠️ TODO(사양 복귀): 실카메라 화각 + ROI/PID 정면정렬을 붙인 뒤, 임계를 0.30 → 0.60 까지
+#    단계적으로 올리며 각 단계에서 confirm 동작을 검증해야 한다(최종 목표는 60%).
+#    임계를 바꾸면 tests/test_maze_logic.py::test_confirm_threshold_boundary 도 같이 갱신할 것.
+CONFIRM_THRESHOLD = 0.30
 
 
 def normalize_color(name):

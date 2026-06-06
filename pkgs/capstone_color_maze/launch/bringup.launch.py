@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-runtime.launch.py
-색미로 '런타임' 단계: 저장된 맵 로드 → AMCL 로컬라이즈 → Nav2 → 색벽 순회/정지.
-[수정 사양: 출구 없음, target 색 모든 벽 순회 후 마지막 확인 벽에서 정지 + /maze_done]
+bringup.launch.py
+색미로 '런타임 상시 구동' — 한 번 켜두면 RED/GREEN/BLUE 어떤 색이 와도 처리한다.
+[수정 사양: 색을 launch 인자가 아니라 런타임 토픽(/target_color)으로 받는다]
 
-구성:
-  (옵션) gazebo + Burger 스폰     start_gazebo:=true  (시뮬레이션 검증용)
-  nav2_bringup bringup_launch.py  (map_server + AMCL + planner/controller/bt + lifecycle)
-  color_confirm.py                (/target_confirmed: target 색 >=60% 프레임 점유)
-  maze_tour.py                    (모든 target 벽 순회 → 마지막 확인 벽 정지 → /maze_done)
+구성(전부 색 무관, 계속 떠 있음):
+  (옵션) gazebo + Burger 스폰        start_gazebo:=true  (시뮬 검증용)
+  nav2_bringup bringup_launch.py     map_server + AMCL + planner/controller/bt
+  color_confirm.py                   /target_color 로 대상 색 동적 전환, /target_confirmed 발행
+  maze_tour.py (oneshot=false)       /target_color 받으면 그 색 순회 → /maze_done → 다시 대기
 
 사용:
-  export TURTLEBOT3_MODEL=burger        # 또는 burger_cam (카메라 포함 모델)
-  source /opt/ros/humble/setup.bash
-  source <turtlebot3_ws>/install/setup.bash
-  ros2 launch <경로>/runtime.launch.py target_color:=RED
-  # 실로봇: start_gazebo:=false (gazebo 띄우지 않음), use_sim_time:=false
+  # 1) 스택 상시 구동(시뮬)
+  ros2 launch <경로>/bringup.launch.py
+  #    실로봇:  start_gazebo:=false use_sim_time:=false relocalize:=true
+  # 2) 색은 그때그때 토픽으로 지정(재시작 불필요):
+  ros2 topic pub --once /target_color std_msgs/String "{data: RED}"
+  ros2 topic pub --once /target_color std_msgs/String "{data: GREEN}"
+  #    또는:  ros2 launch <경로>/mission.launch.py color:=BLUE
 """
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -30,30 +32,27 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     here = os.path.dirname(os.path.realpath(__file__))
-    pkg = os.path.dirname(here)                      # capstone_color_maze/
-    default_map = os.path.join(pkg, 'maps', 'color_room.yaml')   # 현재 월드(color_room) 재매핑 맵
+    pkg = os.path.dirname(here)
+    default_map = os.path.join(pkg, 'maps', 'color_room.yaml')
     default_params = os.path.join(pkg, 'config', 'nav2_maze.yaml')
     color_confirm = os.path.join(pkg, 'scripts', 'color_confirm.py')
     maze_tour = os.path.join(pkg, 'scripts', 'maze_tour.py')
 
-    target_color = LaunchConfiguration('target_color', default='RED')
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     start_gazebo = LaunchConfiguration('start_gazebo', default='true')
+    # 실로봇: 시작 시 제자리 회전으로 자기위치부터 찾기. 시뮬은 set_initial_pose 라 false.
+    relocalize = LaunchConfiguration('relocalize', default='false')
     map_yaml = LaunchConfiguration('map', default=default_map)
     params_file = LaunchConfiguration('params_file', default=default_params)
-    # 실로봇: 순회 전에 제자리 회전으로 자기위치부터 찾기(AMCL 전역 재초기화+수렴).
-    # 시뮬은 set_initial_pose 가 맞으므로 기본 false.
-    relocalize = LaunchConfiguration('relocalize', default='false')
+    default_landmarks = os.path.join(pkg, 'maps', 'color_landmarks.yaml')
+    landmarks = LaunchConfiguration('landmarks', default=default_landmarks)
 
     nav2_bringup = get_package_share_directory('nav2_bringup')
 
-    # (옵션) 시뮬레이션: world + Burger 스폰 (스폰 -2.0,-2.0 = nav2_maze.yaml AMCL 초기포즈와 일치)
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(here, 'color_maze.launch.py')),
         condition=IfCondition(start_gazebo),
     )
-
-    # 맵 로드 + AMCL + Nav2 (use_sim_time / map 은 RewrittenYaml 로 주입됨)
     nav2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(nav2_bringup, 'launch', 'bringup_launch.py')),
@@ -65,32 +64,30 @@ def generate_launch_description():
         }.items(),
     )
 
-    # 비-패키지 스크립트는 ExecuteProcess 로 직접 실행(이 패키지 관례 유지)
+    # 색 무관: target_color 를 주지 않는다 → 둘 다 /target_color 를 구독해 대기.
     confirm_proc = ExecuteProcess(
         cmd=['python3', color_confirm, '--ros-args',
-             '-p', ['target_color:=', target_color],
              '-p', ['use_sim_time:=', use_sim_time]],
         output='screen',
     )
-    # 단발(oneshot): 지정한 한 색만 순회하고 종료. 연속 운영은 bringup.launch.py + mission.launch.py.
     tour_proc = ExecuteProcess(
         cmd=['python3', maze_tour, '--ros-args',
-             '-p', ['target_color:=', target_color],
              '-p', ['use_sim_time:=', use_sim_time],
              '-p', ['relocalize:=', relocalize],
-             '-p', 'oneshot:=true'],
+             '-p', ['landmarks_path:=', landmarks],
+             '-p', 'oneshot:=false'],
         output='screen',
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('target_color', default_value='RED',
-                              description='RED | GREEN | BLUE'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('start_gazebo', default_value='true',
                               description='시뮬레이션이면 true, 실로봇이면 false'),
         DeclareLaunchArgument('relocalize', default_value='false',
-                              description='실로봇이면 true: 순회 전 제자리 회전으로 자기위치 추정'),
+                              description='실로봇이면 true: 시작 시 제자리 회전으로 자기위치 추정'),
         DeclareLaunchArgument('map', default_value=default_map),
+        DeclareLaunchArgument('landmarks', default_value=default_landmarks,
+                              description='색 시맨틱맵(color_landmarks.yaml) 경로'),
         DeclareLaunchArgument('params_file', default_value=default_params),
         gazebo,
         nav2,

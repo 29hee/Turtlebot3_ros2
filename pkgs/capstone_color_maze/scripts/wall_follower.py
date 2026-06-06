@@ -11,6 +11,7 @@ import math
 import sys
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 
@@ -19,7 +20,8 @@ class WallFollower(Node):
     def __init__(self, duration):
         super().__init__('wall_follower')
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.sub = self.create_subscription(LaserScan, 'scan', self.on_scan, 10)
+        self.sub = self.create_subscription(
+            LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
         self.timer = self.create_timer(0.1, self.on_timer)
         self.start = self.get_clock().now()
         self.duration = duration
@@ -55,8 +57,9 @@ class WallFollower(Node):
         if elapsed > self.duration:
             self.pub.publish(Twist())
             self.get_logger().info(f'시간 종료({self.duration}s) -> 정지')
-            rclpy.shutdown()
-            return
+            # 타이머 콜백 안 rclpy.shutdown() 은 교착 → 프로세스가 안 끝난다. SystemExit 로 탈출.
+            self.timer.cancel()
+            raise SystemExit
         if self.scan is None:
             return
 
@@ -89,7 +92,7 @@ def main():
     node = WallFollower(duration)
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):   # SystemExit = --duration 경과로 정상 종료
         node.pub.publish(Twist())
     finally:
         if rclpy.ok():

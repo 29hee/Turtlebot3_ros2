@@ -24,6 +24,7 @@ mission_executor.py
   # 색은 인자 또는 파라미터로:  python3 mission_executor.py --ros-args -p target_color:=BLUE
 """
 import math
+import os
 import sys
 import time
 
@@ -54,8 +55,10 @@ class MissionExecutor(Node):
 
         # ── 파라미터 ──────────────────────────────────────────────
         self.declare_parameter('target_color', '')         # 빈값이면 argv 에서 읽음
+        # 이 스크립트 기준 ../maps/color_landmarks.yaml (하드코딩 절대경로 제거)
+        _here = os.path.dirname(os.path.realpath(__file__))
         self.declare_parameter('landmarks_path',
-            '/home/user/workspace/ros2_project/capstone_color_maze/maps/color_landmarks.yaml')
+            os.path.join(os.path.dirname(_here), 'maps', 'color_landmarks.yaml'))
         self.declare_parameter('exit_x', -1.5)
         self.declare_parameter('exit_y', -1.5)
         self.declare_parameter('standoff', 0.45)            # 벽 앞 정지 거리 [m]

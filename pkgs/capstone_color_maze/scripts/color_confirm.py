@@ -24,8 +24,9 @@ maze_tour.py(내비게이션)가 이 토픽을 보고 벽 도착을 확정한다
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 import cv2
 import numpy as np
 from cv_bridge import CvBridge
@@ -38,7 +39,8 @@ class ColorConfirm(Node):
         super().__init__('color_confirm')
 
         self.declare_parameter('image_topic', '/camera/image_raw')
-        self.declare_parameter('target_color', 'RED')
+        # 초기 색(비워두면 /target_color 가 올 때까지 대기). 색 무관 bringup 은 ''.
+        self.declare_parameter('target_color', '')
         self.declare_parameter('threshold', CONFIRM_THRESHOLD)   # 프레임 점유율 임계
         self.declare_parameter('open_kernel', 3)                 # 노이즈 제거 커널 크기
 
@@ -47,20 +49,28 @@ class ColorConfirm(Node):
         k = int(self.get_parameter('open_kernel').value)
         self.kernel = np.ones((k, k), np.uint8) if k > 0 else None
 
+        # target 은 런타임에 /target_color 로 바뀐다(없으면 대기). 잘못된 값은 무시.
         self.target = normalize_color(self.get_parameter('target_color').value)
-        if self.target is None:
-            raise ValueError(
-                f"target_color 가 RED/GREEN/BLUE 중 하나가 아님: "
-                f"{self.get_parameter('target_color').value!r}")
 
         self.bridge = CvBridge()
-        self.sub = self.create_subscription(Image, image_topic, self.image_cb, 10)
+        self.sub = self.create_subscription(
+            Image, image_topic, self.image_cb, qos_profile_sensor_data)
+        self.create_subscription(String, '/target_color', self._on_target, 10)
         self.pub_cov = self.create_publisher(Float32, '/target_coverage', 10)
         self.pub_ok = self.create_publisher(Bool, '/target_confirmed', 10)
 
         self.get_logger().info(
-            f"color_confirm 시작 — target={self.target}, 임계={self.threshold:.0%}, "
-            f"구독={image_topic}")
+            f"color_confirm 시작 — target={self.target or '(대기)'}, "
+            f"임계={self.threshold:.0%}, 구독={image_topic} + /target_color")
+
+    def _on_target(self, msg):
+        c = normalize_color(msg.data)
+        if c is None:
+            self.get_logger().warn(f"/target_color 무시(RED/GREEN/BLUE 아님): {msg.data!r}")
+            return
+        if c != self.target:
+            self.target = c
+            self.get_logger().info(f"target 색 전환 → {c}")
 
     def target_mask(self, hsv):
         """target 색 HSV 범위들을 OR 로 합쳐 이진 마스크 반환."""
@@ -77,6 +87,11 @@ class ColorConfirm(Node):
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
             self.get_logger().warn(f"cv_bridge 변환 실패: {e}")
+            return
+
+        if self.target is None:   # 아직 색 미지정 → 확정 안 됨(0%)
+            self.pub_cov.publish(Float32(data=0.0))
+            self.pub_ok.publish(Bool(data=False))
             return
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)   # 전체 프레임(ROI 아님)
