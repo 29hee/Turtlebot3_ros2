@@ -115,6 +115,10 @@ class MazeExplorer(Node):
         # 진행 워치독용 표본
         self.wd_pose = None
         self.wd_time = self.start
+        # /color_signal 생존 감시 — 안 들어오면 vision_node 가 죽은 것(색 못 봄 → approach 불가)
+        self._last_signal_time = None
+        self._last_sig_warn = 0.0
+        self._last_phase_pub = 0.0
         self.get_logger().info(
             f"maze_explorer 시작 — 색-반응 매핑, total(상한)={self.total:.0f}s, "
             f"standoff={self.standoff}m, stuck<{self.stuck_dist}m/{self.stuck_win:.0f}s")
@@ -134,6 +138,7 @@ class MazeExplorer(Node):
         """vision_node 의 [color_id, cx_norm, coverage] → 비주얼 서보/발견 신호.
         seen_ratio 미만 점유율은 NONE 으로 취급(탐사기측 발견 임계)."""
         d = msg.data
+        self._last_signal_time = self.now()   # 신호 생존 표시
         if len(d) < 3:
             return
         cov = float(d[2])
@@ -232,6 +237,24 @@ class MazeExplorer(Node):
             return
         if self.scan is None:
             return
+
+        # ★ 색 신호(/color_signal) 생존 감시 — 이게 없으면 색을 못 봐 'approach' 자체가 불가.
+        #   (조용히 벽만 도는 대신 큰 소리로 알려 vision_node 누락/사망을 즉시 드러낸다.)
+        now_s = self.elapsed(self.start)
+        stale = (self._last_signal_time is None
+                 or self.elapsed(self._last_signal_time) > 3.0)
+        if stale and now_s - self._last_sig_warn > 5.0:
+            self._last_sig_warn = now_s
+            self.get_logger().error(
+                "⚠ /color_signal 안 들어옴 → 색을 못 봐 패널 접근 불가(OCR도 불가). "
+                "vision_node 가 떠 있는지 확인: ros2 node list | grep vision_node "
+                "(없으면 mapping.launch 로 띄우거나 vision_node.py 실행; numpy<2 필요)")
+
+        # 현재 상태를 1초마다 방송(quality_monitor/사용자가 실시간으로 뭐 하는지 보게)
+        if now_s - self._last_phase_pub > 1.0:
+            self._last_phase_pub = now_s
+            tag = self.interrupt or self.phase
+            self.publish_phase(f"{tag} (색:{self.color}, 캡처:{len(self.captured)})")
 
         pose = self.get_pose()
 
