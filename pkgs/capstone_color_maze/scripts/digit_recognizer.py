@@ -80,6 +80,11 @@ class DigitRecognizer(Node):
 
     def read_digit(self, roi_bgr):
         """EasyOCR 로 ROI 의 단일 숫자 인식. (숫자, conf). 없으면 (-1, best_conf)."""
+        # 작은 숫자 보강: 2배 업스케일(INTER_CUBIC) 후 인식 — 멀거나 작은 글자 인식률↑.
+        try:
+            roi_bgr = cv2.resize(roi_bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        except Exception:
+            pass
         try:
             results = self._reader.readtext(roi_bgr, allowlist='0123456789', detail=1)
         except Exception as e:

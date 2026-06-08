@@ -114,6 +114,7 @@ class MazeExplorer(Node):
         self.phase_start = self.start
         self.captured = []           # [(x,y), ...] 이미 캡처한 패널 map 좌표(중복 방지)
         self.skipped = []            # [(x,y), ...] 접근 시간초과로 건너뛴 위치(재트리거 방지)
+        self.inward_target = None    # 내부(섬) 진입 목표 = 둘레 경로 무게중심(≈방 중앙)
         self.visited = set()         # 방문 격자 셀 인덱스
         self.start_cell = None       # 둘레 loop closure 기준 시작 셀
         self.left_start = False      # 시작 셀을 충분히 벗어났는가(복귀 판정 게이트)
@@ -177,6 +178,16 @@ class MazeExplorer(Node):
     def cell(self, x, y):
         return (int(math.floor(x / self.visit_res)), int(math.floor(y / self.visit_res)))
 
+    def visited_centroid(self):
+        """방문한 격자 셀들의 중심 = 둘레를 돈 경로의 무게중심 ≈ 방 중앙.
+        SLAM 원점(0,0)은 '로봇 시작 위치'이지 방 중앙이 아니므로, 내부(섬) 진입 목표로
+        이걸 쓴다(시작점으로 되돌아가 엉뚱한 벽을 섬으로 오인하던 문제 해결)."""
+        if not self.visited:
+            return (0.0, 0.0)
+        xs = [(gx + 0.5) * self.visit_res for (gx, gy) in self.visited]
+        ys = [(gy + 0.5) * self.visit_res for (gx, gy) in self.visited]
+        return (sum(xs) / len(xs), sum(ys) / len(ys))
+
     # ── 주행 프리미티브 ──────────────────────────────────────────────
     def wall_follow_cmd(self):
         """오른손 벽타기 한 스텝."""
@@ -205,8 +216,10 @@ class MazeExplorer(Node):
         cmd.angular.z = max(-0.35, min(0.35, -0.6 * self.color_cx))
         if front <= self.standoff:
             return True, Twist()              # 도착(정지)
-        # ★ 먼저 색을 화면 중앙으로 '유심히' 정렬한 뒤에만 전진. 덜 맞으면 제자리 회전만(천천히).
-        cmd.linear.x = self.v_fwd if abs(self.color_cx) < 0.25 else 0.0
+        # 정렬도에 비례해 전진: 중앙(cx≈0)=full, 비스듬할수록 느리게, |cx|≥0.5면 거의 정지.
+        # 어안렌즈로 cx 가 안 잡혀도 '제자리 스톨' 없이 늘 그쪽을 보며 천천히 다가간다.
+        align = max(0.0, 1.0 - abs(self.color_cx) / 0.5)
+        cmd.linear.x = self.v_fwd * align
         return False, cmd
 
     def publish_phase(self, text):
@@ -356,7 +369,10 @@ class MazeExplorer(Node):
             if not self.left_start and d_start > 1.0:
                 self.left_start = True
             if self.left_start and d_start < self.loop_close_dist:
-                self.get_logger().info('=== 둘레 한 바퀴(loop closure) → 중앙 진입 ===')
+                self.inward_target = self.visited_centroid()   # (0,0)=시작점 아님 → 둘레 중심으로
+                self.get_logger().info(
+                    f'=== 둘레 한 바퀴(loop closure) → 내부'
+                    f'({self.inward_target[0]:+.1f},{self.inward_target[1]:+.1f}) 진입 ===')
                 self.publish_phase('INWARD')
                 self.switch('INWARD')
                 return
@@ -373,13 +389,14 @@ class MazeExplorer(Node):
                 self.start_cell = cur          # 섬 loop closure 기준 갱신
                 self.switch('ISLAND')
                 return
+            tx, ty = self.inward_target if self.inward_target else (0.0, 0.0)
             c = Twist()
-            herr = wrap(math.atan2(0.0 - y, 0.0 - x) - pose[2])
+            herr = wrap(math.atan2(ty - y, tx - x) - pose[2])
             c.angular.z = max(-0.4, min(0.4, 0.9 * herr))
             c.linear.x = self.v_fwd if abs(herr) < 0.5 else 0.05
-            # 중앙 근처(원점 0.4m)인데 섬이 없으면 섬 없음 → 종료.
-            if math.hypot(x, y) < 0.4:
-                self.stop_and_quit('중앙 도달했으나 섬 없음 → 탐사 종료')
+            # 내부 목표(둘레 무게중심) 근처인데 섬이 없으면 섬 없음 → 종료.
+            if math.hypot(x - tx, y - ty) < 0.4:
+                self.stop_and_quit('내부 중심 도달했으나 섬 없음 → 탐사 종료')
                 return
             self.pub.publish(c)
 
