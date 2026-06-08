@@ -37,16 +37,20 @@ def generate_launch_description():
     world = os.path.join(pkg, 'worlds', 'color_room.world')
     wall_follower = os.path.join(pkg, 'scripts', 'wall_follower.py')
     scan_explorer = os.path.join(pkg, 'scripts', 'scan_explorer.py')
+    maze_explorer = os.path.join(pkg, 'scripts', 'maze_explorer.py')
     color_mapper = os.path.join(pkg, 'scripts', 'color_mapper.py')
+    digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     x_pose = LaunchConfiguration('x_pose', default='-2.0')
     y_pose = LaunchConfiguration('y_pose', default='-2.0')
     explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
-    # 탐사기 선택: scan(벽면 카메라 매핑용, 주기적 느린 360°회전) | wall(단순 벽타기)
-    explorer = LaunchConfiguration('explorer', default='scan')
-    # 느린 회전(스캔당 ~24s) 탓에 300s 면 둘레 60%만 돔(북쪽 벽 누락). 600s 로 완주 보장.
-    duration = LaunchConfiguration('duration', default='660')
+    # 탐사기 선택: maze(색-반응 근접캡처+안티스턱, 권장) | scan(구 느린360°스캔) | wall(단순 벽타기)
+    explorer = LaunchConfiguration('explorer', default='maze')
+    # 숫자(EasyOCR) 인식기 동반 여부. 패널에 숫자가 있을 때만 true(첫 실행 시 모델 다운로드).
+    digit = LaunchConfiguration('digit', default='false')
+    # 종료는 본래 '미방문 소진'이지만 폭주 방지 시간 상한.
+    duration = LaunchConfiguration('duration', default='600')
 
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
@@ -78,10 +82,17 @@ def generate_launch_description():
     # 색 라벨 누적(격자 투표 → color_landmarks.yaml)을 돕는 탐사 주행.
     #  explorer:=scan → scan_explorer(벽면 카메라 매핑용: 주기적 느린 360°회전으로 벽 face-on 스캔)
     #  explorer:=wall → wall_follower(단순 오른손 벽타기)
+    maze_cond = PythonExpression(
+        ["'", explore, "' == 'true' and '", explorer, "' == 'maze'"])
     scan_cond = PythonExpression(
         ["'", explore, "' == 'true' and '", explorer, "' == 'scan'"])
     wall_cond = PythonExpression(
         ["'", explore, "' == 'true' and '", explorer, "' == 'wall'"])
+    maze_proc = ExecuteProcess(
+        cmd=['python3', maze_explorer, '--duration', duration,
+             '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(maze_cond), output='screen',
+    )
     scan_proc = ExecuteProcess(
         cmd=['python3', scan_explorer, '--duration', duration],
         condition=IfCondition(scan_cond), output='screen',
@@ -94,6 +105,11 @@ def generate_launch_description():
         cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
+    # 숫자 인식기(EasyOCR) — digit:=true 일 때만. /detected_digit 발행 → color_mapper 가 격자 digit 투표.
+    digit_proc = ExecuteProcess(
+        cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(digit), output='screen',
+    )
 
     return LaunchDescription([
         # 자식 프로세스(gzserver/스폰)도 카메라 모델을 상속받도록 런치 환경에 고정
@@ -102,10 +118,12 @@ def generate_launch_description():
         DeclareLaunchArgument('y_pose', default_value='-2.0'),
         DeclareLaunchArgument('explore', default_value='true',
                               description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
-        DeclareLaunchArgument('explorer', default_value='scan',
-                              description='scan=느린360°회전 벽면스캔 | wall=단순 벽타기'),
-        DeclareLaunchArgument('duration', default_value='660',
-                              description='탐사 주행 시간[s] (촘촘한 스핀 완주엔 660s 권장)'),
+        DeclareLaunchArgument('explorer', default_value='maze',
+                              description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
+        DeclareLaunchArgument('digit', default_value='false',
+                              description='true=EasyOCR 숫자 인식기 동반(패널에 숫자 있을 때)'),
+        DeclareLaunchArgument('duration', default_value='600',
+                              description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         gzserver, gzclient, rsp, spawn, slam,
-        scan_proc, wf_proc, mapper_proc,
+        maze_proc, scan_proc, wf_proc, mapper_proc, digit_proc,
     ])
