@@ -3,8 +3,11 @@
 자율주행 SLAM 매핑 → 색 안내 런타임까지 실로봇 전체 명령. 시뮬은 `README.md` 참고.
 
 > **먼저 본인 환경에 맞게 바꿀 값**
-> `<로봇IP>` · `<워크스페이스>`(turtlebot3_ws) · `<클론경로>`(co_project 위치) · `ROS_DOMAIN_ID`(로봇·PC 동일)
-> **카메라 토픽은 반드시 `/camera/image_raw`** (색 노드가 이걸 구독).
+> `<로봇IP>` · `<워크스페이스>`(turtlebot3_ws) · `ROS_DOMAIN_ID`(로봇·PC 동일)
+> (co_project 경로는 이 노트북 기준 `/home/user/workspace/co_project` 로 이미 박아둠.)
+> **카메라 배선:** v4l2(로봇)는 `/camera/image_raw_rot` 로 발행 → image_upright(PC)가 표준 토픽
+> `/camera/image_raw` 를 똑바로 세워 채움(색 노드는 이걸 구독). v4l2 를 `/camera/image_raw` 로 직접
+> remap 하지 말 것 — publisher 가 겹쳐 영상이 꼬인다.
 
 ---
 
@@ -13,8 +16,15 @@
 export TURTLEBOT3_MODEL=burger_cam
 export ROS_DOMAIN_ID=30                       # 로봇과 PC 같은 값!
 source /opt/ros/humble/setup.bash
-source <워크스페이스>/install/setup.bash       # 예: ~/turtlebot3_ws/install/setup.bash
+source <워크스페이스>/install/setup.bash       # 이 노트북(PC): /home/user/workspace/install/setup.bash · 로봇(Pi): ~/turtlebot3_ws/install/setup.bash
 ```
+
+> **숫자 인식 의존성(색 노드 돌리는 PC만, 1회).** 숫자는 Tesseract OCR 로 읽는다(과거 MNIST CNN 폐기).
+> ```bash
+> sudo apt install -y tesseract-ocr        # OCR 엔진
+> pip3 install pytesseract                 # 파이썬 바인딩
+> ```
+> 미설치여도 색 인식은 정상 동작하고 숫자만 OFF 된다. 숫자 자체가 불필요하면 `-p digit:=false`.
 
 ## 1) 로봇(라즈베리파이) 측 — SSH
 ```bash
@@ -22,9 +32,25 @@ ssh ubuntu@<로봇IP>
 # (0번 환경 source 후)
 ros2 launch turtlebot3_bringup robot.launch.py          # 라이다 + 모터 + odom TF
 
-# 카메라 노드 (별도 터미널) — 토픽명을 /camera/image_raw 로 맞춤:
-ros2 run v4l2_camera v4l2_camera_node --ros-args -r /image_raw:=/camera/image_raw
-#   ↑ USB캠 기준. Pi캠이면 해당 노드. 토픽만 동일하게.
+# 카메라 노드 (별도 터미널) — 우리 버거는 카메라가 '거꾸로' 장착됨.
+#   원본을 _rot 으로 빼면(거꾸로), PC 의 image_upright(아래 1.5)가 똑바로 세워 표준 토픽을 채운다.
+ros2 run v4l2_camera v4l2_camera_node --ros-args -r /image_raw:=/camera/image_raw_rot
+#   ↑ USB캠 기준. Pi캠이면 해당 노드. 토픽만 /camera/image_raw_rot 로 동일하게.
+#   ⚠ /camera/image_raw 로 직접 remap 금지 — image_upright 와 publisher 가 겹쳐 영상이 꼬인다.
+```
+
+---
+
+## 1.5) PC — 카메라 상하반전 보정 (Phase 1·2 내내 켜둠)
+> 거꾸로 장착된 카메라를 '소스에서 1회' 회전해 표준 토픽 `/camera/image_raw` 를 똑바로 채운다.
+> 이 노드 하나만 거치면 RViz·color_confirm·OCR·rqt 등 모든 구독자가 정상 방향을 본다.
+> **로봇이 아니라 PC(이 노트북)에서** 돌린다 — Pi 에 OpenCV/cv_bridge·repo 를 안 깔아도 되고 Pi CPU 도 아낀다.
+> image_upright 가 `/camera/image_raw` 의 **유일한 publisher** → 죽으면 색 인지가 통째로 멈춘다(꼭 켜둘 것).
+```bash
+cd /home/user/workspace/co_project/pkgs/capstone_color_maze
+python3 scripts/image_upright.py
+#   좌우만/상하만 뒤집힌 장착이면:  python3 scripts/image_upright.py --ros-args -p flip:=h   (또는 v)
+#   켜두면 Phase 1·2 가 이 한 노드를 공유. 똑바로 선 압축영상은 /camera/image_raw/compressed 로도 나온다.
 ```
 
 ---
@@ -34,7 +60,7 @@ ros2 run v4l2_camera v4l2_camera_node --ros-args -r /image_raw:=/camera/image_ra
 > 매핑 중엔 **주변에 사람을 비우고, Ctrl-C(비상정지) 대기**할 것.
 
 ```bash
-cd <클론경로>/co_project/pkgs/capstone_color_maze
+cd /home/user/workspace/co_project/pkgs/capstone_color_maze
 
 # (터미널 A) SLAM
 ros2 launch slam_toolbox online_async_launch.py use_sim_time:=false
@@ -65,7 +91,7 @@ python3 -c "import sys;sys.path.insert(0,'scripts');import yaml;from maze_common
 
 ## 3) PC — Phase 2: 런타임 색 안내 (상시 구동)
 ```bash
-cd <클론경로>/co_project/pkgs/capstone_color_maze
+cd /home/user/workspace/co_project/pkgs/capstone_color_maze
 
 # (터미널 A) 스택 상시 구동 — 실로봇: gazebo 안 띄움 / 실시간 / 시작 시 자기위치추정
 ros2 launch launch/bringup.launch.py \
@@ -101,8 +127,9 @@ ros2 topic hz /scan
 
 # ── 카메라 정상? ─────────────────────────────────────────────
 ros2 topic hz /camera/image_raw
-#   카메라 프레임 주파수(보통 10~30Hz). 안 뜨면 → 카메라 노드 없음 or 토픽명 불일치
-#   (로봇-T2 의 -r /image_raw:=/camera/image_raw remap 확인).
+#   카메라 프레임 주파수(보통 10~30Hz). 이 토픽은 image_upright 가 채우는 '똑바로 선' 영상.
+#   안 뜨면 → ① v4l2 가 /camera/image_raw_rot 으로 발행 중인지, ② image_upright 가 떠 있는지 확인.
+#   (원본 거꾸로 영상은 /camera/image_raw_rot 에서 hz 확인 가능)
 
 # ── 현재 색을 얼마나 보고 있나? ──────────────────────────────
 ros2 topic echo /target_coverage
@@ -120,18 +147,21 @@ ros2 run tf2_ros tf2_echo map base_link
 
 # ── 카메라 영상 가볍게 보기 (WiFi 느릴 때) ──────────────────
 ros2 run rqt_image_view rqt_image_view /camera/image_raw/compressed
-#   압축 영상 뷰어. RViz Image(raw)는 대역폭이 커 WiFi에서 끊길 때 대안.
+#   image_upright 가 내는 '똑바로 선' 압축 영상(대역폭 절약). 평소엔 이걸 본다.
+#   원본(거꾸로) 생존만 확인하려면:  rqt_image_view /camera/image_raw_rot/compressed
 
 # ── 색 검출(HSV 마스크)을 눈으로 보정 ───────────────────────
 python3 scripts/color_detector.py --ros-args -p show:=true
 #   원본 + R/G/B 마스크 창. 실조명에서 색이 잡히는지/흰벽이 색으로 새지 않는지 확인
 #   → maze_common.py 의 COLOR_RANGES(특히 S_min) 튜닝 후 재실행.
+#   숫자 OCR 까지 보려면 1.5 의 image_upright 가 떠 있어야 함(아니면 숫자가 거꾸로 → -p rotate_180:=true).
 ```
 
 ## 5) 종료 (좀비 정리)
 ```bash
 for p in '[s]lam_toolbox' '[a]mcl' '[m]ap_server' '[c]ontroller_server' '[p]lanner_server' \
-         '[b]t_navigator' '[l]ifecycle' '[c]olor_confirm' '[m]aze_tour' '[c]olor_mapper' '[s]can_explorer'; do
+         '[b]t_navigator' '[l]ifecycle' '[c]olor_confirm' '[m]aze_tour' '[c]olor_mapper' '[s]can_explorer' \
+         '[i]mage_upright'; do
   pkill -9 -f "$p"; done; ros2 daemon stop; ros2 daemon start
 ```
 
@@ -139,7 +169,9 @@ for p in '[s]lam_toolbox' '[a]mcl' '[m]ap_server' '[c]ontroller_server' '[p]lann
 
 ## ⚠️ 실로봇 필수 체크 (안 맞으면 조용히 실패)
 1. **`ROS_DOMAIN_ID` 로봇=PC 동일** — 다르면 통신 자체 안 됨
-2. **카메라 토픽 `/camera/image_raw`** — 다르면 색 노드가 영원히 0% (1번 remap 확인)
+2. **카메라 토픽 `/camera/image_raw`** — 다르면 색 노드가 영원히 0% (1번 remap 확인).
+   우리 버거는 카메라가 **거꾸로** 장착 → v4l2 는 `/camera/image_raw_rot` 으로 빼고
+   **`image_upright.py` 를 반드시 띄워** 표준 토픽을 똑바로 세울 것(안 띄우면 표준 토픽 발행자 0).
 3. **`use_sim_time:=false`** 어디서나 — true면 TF/시간 꼬여 전멸
 4. **초기 위치** — `relocalize:=true` 또는 RViz "2D Pose Estimate"
 5. **시뮬 맵 재사용 금지** — 실제 공간 새로 매핑(Phase 1) 필수
