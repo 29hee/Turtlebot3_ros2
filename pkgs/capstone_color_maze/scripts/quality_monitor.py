@@ -48,7 +48,7 @@ class QualityMonitor(Node):
     def __init__(self):
         super().__init__('quality_monitor')
         self.declare_parameter('landmarks_path', default_landmarks_path())
-        self.declare_parameter('period', 4.0)
+        self.declare_parameter('period', 60.0)   # 품질 출력 주기 [s] (1분에 한 번)
         # 미션 사양: 색당 3개 × 3색 = 총 9개 패널. 기본을 9개 기준으로 둔다.
         self.declare_parameter('expect', 'RED:3,GREEN:3,BLUE:3')
 

@@ -55,12 +55,13 @@ class MazeExplorer(Node):
         # (중복 선언하면 ParameterAlreadyDeclaredException 으로 노드가 죽는다).
 
         # ── 주행/벽타기 파라미터 ─────────────────────────────────────
-        self.declare_parameter('v_fwd', 0.13)        # 전진 속도 [m/s]
+        self.declare_parameter('v_fwd', 0.08)        # 전진 속도 [m/s] (느리게 — 색 놓치지 않게)
         self.declare_parameter('target_right', 0.45)  # 오른쪽 벽 유지 거리 [m]
         self.declare_parameter('front_stop', 0.45)    # 전방 정지 임계 [m]
-        self.declare_parameter('spin_speed', 0.3)     # 회전 각속도 [rad/s] (느리게!)
+        self.declare_parameter('spin_speed', 0.25)    # 회전 각속도 [rad/s] (느리게! SLAM 보호)
         # ── 색 접근(비주얼 서보) 파라미터 ───────────────────────────
-        self.declare_parameter('seen_ratio', 0.04)    # ROI 색 점유율 ≥ 이 값이면 '발견' → 접근
+        # 작은 색 조각(≈5%)만 보여도 그쪽으로 정렬·접근하도록 낮게 둔다.
+        self.declare_parameter('seen_ratio', 0.03)    # ROI 색 점유율 ≥ 이 값이면 '발견' → 접근
         self.declare_parameter('standoff', 0.30)      # 패널 앞 정지 거리(라이다 정면) [m]
         self.declare_parameter('capture_secs', 2.5)   # 근접 dwell 시간 [s] (이 동안 기록 누적)
         self.declare_parameter('dedup_dist', 0.6)     # 이 거리 내 이미 캡처한 패널이면 재접근 스킵 [m]
@@ -173,14 +174,14 @@ class MazeExplorer(Node):
         right = self.sector_min(-100, -80)
         cmd = Twist()
         if front < self.front_stop:
-            cmd.angular.z = 0.7            # 전방 막힘 → 좌회전
+            cmd.angular.z = 0.4            # 전방 막힘 → 좌회전(천천히)
         elif right > 0.9:
-            cmd.linear.x = 0.12            # 오른벽 잃음 → 오른쪽으로 붙기
-            cmd.angular.z = -0.6
+            cmd.linear.x = 0.07            # 오른벽 잃음 → 오른쪽으로 붙기
+            cmd.angular.z = -0.3
         else:
             err = right - self.target_right
             cmd.linear.x = self.v_fwd
-            cmd.angular.z = max(-0.8, min(0.8, -1.6 * err))
+            cmd.angular.z = max(-0.35, min(0.35, -1.0 * err))
         return cmd
 
     def approach_cmd(self):
@@ -190,12 +191,12 @@ class MazeExplorer(Node):
         if self.color == 'NONE':
             return False, cmd                 # 색 놓침 → 상위에서 WALL_FOLLOW 복귀
         front = self.sector_min(-15, 15)
-        # 중심 정렬: cx>0(오른쪽)이면 우회전(-z). 게인 작게.
-        cmd.angular.z = max(-0.6, min(0.6, -0.9 * self.color_cx))
+        # 중심 정렬: cx>0(오른쪽)이면 우회전(-z). 게인 작게(천천히 그쪽을 본다).
+        cmd.angular.z = max(-0.35, min(0.35, -0.6 * self.color_cx))
         if front <= self.standoff:
             return True, Twist()              # 도착(정지)
-        # 정렬이 크게 어긋나면 회전 위주, 맞으면 전진
-        cmd.linear.x = self.v_fwd if abs(self.color_cx) < 0.3 else 0.04
+        # ★ 먼저 색을 화면 중앙으로 '유심히' 정렬한 뒤에만 전진. 덜 맞으면 제자리 회전만(천천히).
+        cmd.linear.x = self.v_fwd if abs(self.color_cx) < 0.25 else 0.0
         return False, cmd
 
     def publish_phase(self, text):
@@ -261,7 +262,7 @@ class MazeExplorer(Node):
             c = Twist()
             if self.sector_min(-25, 25) < self.front_stop:
                 left = self.sector_min(20, 70); right = self.sector_min(-70, -20)
-                c.angular.z = 0.8 if left > right else -0.8
+                c.angular.z = 0.45 if left > right else -0.45
             else:
                 c.linear.x = self.v_fwd
             self.pub.publish(c)
@@ -337,7 +338,7 @@ class MazeExplorer(Node):
                 return
             c = Twist()
             herr = wrap(math.atan2(0.0 - y, 0.0 - x) - pose[2])
-            c.angular.z = max(-0.6, min(0.6, 1.2 * herr))
+            c.angular.z = max(-0.4, min(0.4, 0.9 * herr))
             c.linear.x = self.v_fwd if abs(herr) < 0.5 else 0.05
             # 중앙 근처(원점 0.4m)인데 섬이 없으면 섬 없음 → 종료.
             if math.hypot(x, y) < 0.4:

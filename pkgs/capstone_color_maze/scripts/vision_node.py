@@ -36,7 +36,7 @@ class VisionNode(Node):
         super().__init__('vision_node')
         self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('roi_ratio', 0.7)     # 중앙 ROI 한 변 비율
-        self.declare_parameter('min_ratio', 0.04)    # 이 점유율 미만이면 NONE(발견 트리거 하한)
+        self.declare_parameter('min_ratio', 0.03)    # 이 점유율 미만이면 NONE(작은 색도 잡게 낮춤)
         self.declare_parameter('show', False)
 
         self.image_topic = self.get_parameter('image_topic').value
