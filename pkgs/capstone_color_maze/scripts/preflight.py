@@ -42,10 +42,13 @@ class Preflight(Node):
     def __init__(self):
         super().__init__('preflight')
         self.img = 0
+        self.rot = 0
         self.scan = 0
         self.last_scan_stamp = None
         self.create_subscription(Image, '/camera/image_raw',
                                  lambda m: self._img(), qos_profile_sensor_data)
+        self.create_subscription(Image, '/camera/image_raw_rot',
+                                 lambda m: self._rot(), qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
         import tf2_ros
         self.tfb = tf2_ros.Buffer()
@@ -53,6 +56,9 @@ class Preflight(Node):
 
     def _img(self):
         self.img += 1
+
+    def _rot(self):
+        self.rot += 1
 
     def _on_scan(self, msg):
         self.scan += 1
@@ -81,10 +87,22 @@ def main():
     while time.time() - t0 < 5.0:
         rclpy.spin_once(n, timeout_sec=0.1)
     dur = max(0.1, time.time() - t0)
-    img_hz, scan_hz = n.img / dur, n.scan / dur
+    img_hz, rot_hz, scan_hz = n.img / dur, n.rot / dur, n.scan / dur
 
-    if img_hz <= 0:
-        line(False, "/camera/image_raw 0Hz — v4l2_camera 미실행? (카메라 노드 확인)")
+    # 카메라 배선 점검: 실로봇은 v4l2→_rot, image_upright→/camera/image_raw 가 정상.
+    pub_raw = n.count_publishers('/camera/image_raw')
+    if rot_hz > 0:
+        line(True, f"/camera/image_raw_rot {rot_hz:.1f}Hz (v4l2 가 _rot 으로 발행 = 정상 배선)")
+    if pub_raw > 1:
+        line(False, f"/camera/image_raw 발행자 {pub_raw}개 — v4l2 가 _rot 으로 remap 안 됨! "
+                    f"image_upright 와 겹쳐 거꾸로/똑바로가 랜덤 섞임. -r /image_raw:=/camera/image_raw_rot")
+    elif rot_hz > 0 and img_hz <= 0:
+        warn("/camera/image_raw 0Hz — image_upright 가 아직 안 떴을 뿐(매핑 런치가 띄움). _rot 은 정상.")
+
+    if img_hz <= 0 and rot_hz <= 0:
+        line(False, "/camera/image_raw(및 _rot) 0Hz — v4l2_camera 미실행? (카메라 노드 확인)")
+    elif img_hz <= 0:
+        pass  # 위에서 _rot 정상 안내함
     elif img_hz < 5:
         warn(f"/camera/image_raw {img_hz:.1f}Hz — 너무 느림. 이동 중 색을 놓침 → "
              f"v4l2 -p image_size:=\"[640,480]\" -p time_per_frame:=\"[1,15]\" 또는 압축전송")

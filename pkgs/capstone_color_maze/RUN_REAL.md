@@ -43,16 +43,20 @@ ros2 run v4l2_camera v4l2_camera_node --ros-args -r /image_raw:=/camera/image_ra
 
 ---
 
-## 1.5) PC — 카메라 상하반전 보정 (Phase 1·2 내내 켜둠)
-> 거꾸로 장착된 카메라를 '소스에서 1회' 회전해 표준 토픽 `/camera/image_raw` 를 똑바로 채운다.
-> 이 노드 하나만 거치면 RViz·color_confirm·OCR·rqt 등 모든 구독자가 정상 방향을 본다.
-> **로봇이 아니라 PC(이 노트북)에서** 돌린다 — Pi 에 OpenCV/cv_bridge·repo 를 안 깔아도 되고 Pi CPU 도 아낀다.
-> image_upright 가 `/camera/image_raw` 의 **유일한 publisher** → 죽으면 색 인지가 통째로 멈춘다(꼭 켜둘 것).
+## 1.5) PC — 카메라 상하반전 보정 (이제 mapping.launch 가 자동으로 띄움)
+> 거꾸로 장착 카메라를 **한 곳(image_upright)에서만** 1회 회전해 `/camera/image_raw` 를 똑바로
+> 채운다. 그 뒤 vision_node·digit_recognizer 는 **회전 없이** 이걸 구독 → 보정이 '순차적'으로
+> 한 번만 적용(이중회전/랜덤 섞임 없음).
+>
+> **Phase 1 매핑은 `mapping.launch.py sim:=false` 가 image_upright 를 자동 구동**하므로 따로
+> 안 띄워도 된다(flip:=180 기본). 단 **v4l2 는 반드시 `/camera/image_raw_rot` 로 remap**(1번)
+> 해야 한다 — 안 그러면 `/camera/image_raw` 에 v4l2 와 image_upright 가 겹쳐 **거꾸로/똑바로가
+> 랜덤으로 섞인다**(image_upright 가 이 경우 ERROR 로 경고함).
+>
+> 수동으로 따로 돌리려면(런타임 등):
 ```bash
 cd /home/user/workspace/co_project/pkgs/capstone_color_maze
-python3 scripts/image_upright.py
-#   좌우만/상하만 뒤집힌 장착이면:  python3 scripts/image_upright.py --ros-args -p flip:=h   (또는 v)
-#   켜두면 Phase 1·2 가 이 한 노드를 공유. 똑바로 선 압축영상은 /camera/image_raw/compressed 로도 나온다.
+python3 scripts/image_upright.py -p flip:=180      # 좌우만/상하만이면 -p flip:=h (또는 v)
 ```
 
 ---

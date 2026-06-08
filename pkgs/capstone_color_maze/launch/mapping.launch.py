@@ -42,6 +42,7 @@ def generate_launch_description():
     vision_node = os.path.join(pkg, 'scripts', 'vision_node.py')
     quality_monitor = os.path.join(pkg, 'scripts', 'quality_monitor.py')
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
+    image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
 
     # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
     #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
@@ -52,9 +53,11 @@ def generate_launch_description():
     explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
     # 탐사기 선택: maze(색-반응 근접캡처+안티스턱, 권장) | scan(구 느린360°스캔) | wall(단순 벽타기)
     explorer = LaunchConfiguration('explorer', default='maze')
-    # 거꾸로 장착 카메라 보정(image_upright 없이도). 실로봇에서 영상이 거꾸로면 flip:=true.
-    #   영상 방향 확인: ros2 run rqt_image_view rqt_image_view /camera/image_raw
-    flip = LaunchConfiguration('flip', default='false')
+    # 거꾸로 장착 카메라 보정을 'image_upright 한 곳'에서만 한다(실로봇=sim:=false 일 때).
+    #   flip = image_upright 회전 모드(180|v|h). 우리 버거는 180. 카메라가 똑바르면 none.
+    #   배선: v4l2(→ /camera/image_raw_rot) → image_upright(회전) → /camera/image_raw(똑바름)
+    #         → vision_node·digit_recognizer 는 회전 없이 이걸 구독(이중회전 방지).
+    flip = LaunchConfiguration('flip', default='180')
     # 가제보 GUI 창(gzclient) 표시 여부. 기본 false=안 띄움(물리 gzserver 는 그대로 동작).
     #   로봇 움직임은 RViz(맵+라이다+색마커)로 보면 충분. 굳이 가제보 창 보려면 gui:=true.
     gui = LaunchConfiguration('gui', default='false')
@@ -116,10 +119,19 @@ def generate_launch_description():
         cmd=['python3', wall_follower, '--duration', duration],
         condition=IfCondition(wall_cond), output='screen',
     )
+    # 카메라 상하반전 보정 — '한 곳에서만'(실로봇). v4l2 의 _rot(거꾸로)을 받아 똑바로 세워
+    #   /camera/image_raw 를 채운다. compressed_in=false(raw _rot 구독, 안정). 대역폭 더 줄이려면
+    #   Pi 에 compressed_image_transport 깔고 compressed_in:=true.
+    upright_proc = ExecuteProcess(
+        cmd=['python3', image_upright, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['flip:=', flip], '-p', 'compressed_in:=false'],
+        condition=IfCondition(PythonExpression(["'", sim, "' == 'false'"])), output='screen',
+    )
     # 단일 디코더 — 영상을 한 번만 풀어 /detected_color, /color_signal 발행(나머지가 구독).
+    #   회전은 image_upright 가 끝냈으니 여기선 rotate_180 안 함(기본 false).
     vision_proc = ExecuteProcess(
-        cmd=['python3', vision_node, '--ros-args',
-             '-p', ['use_sim_time:=', use_sim_time], '-p', ['rotate_180:=', flip]],
+        cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
     # color_mapper 는 '색+숫자 둘 다' 인식된 칸만 저장(무조건) → digit_recognizer 가 필수다.
@@ -135,8 +147,7 @@ def generate_launch_description():
     # 숫자 인식기(EasyOCR) — 색+숫자 둘 다 저장이 필수이므로 매핑에 '상시' 동반.
     #   /detected_digit 발행 → color_mapper 가 격자 digit 투표. (EasyOCR 미설치면 맵이 빈다.)
     digit_proc = ExecuteProcess(
-        cmd=['python3', digit_recognizer, '--ros-args',
-             '-p', ['use_sim_time:=', use_sim_time], '-p', ['rotate_180:=', flip]],
+        cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
 
@@ -149,11 +160,10 @@ def generate_launch_description():
                               description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
         DeclareLaunchArgument('explorer', default_value='maze',
                               description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
-        # 실로봇(sim:=false)은 카메라가 거꾸로 장착(직접 확인됨) → 자동 보정. 시뮬은 정방향.
-        #   재장착 등으로 영상이 똑바르면 flip:=false 로 끌 것.
-        DeclareLaunchArgument('flip', default_value=PythonExpression(
-                                  ["'true' if '", sim, "' == 'false' else 'false'"]),
-                              description='카메라 거꾸로면 true(숫자 OCR용 180° 보정). 실로봇 자동 true'),
+        # image_upright 회전 모드(실로봇만 동작). 우리 버거 카메라는 거꾸로(직접 확인) → 180.
+        #   카메라가 똑바르면 flip:=none.
+        DeclareLaunchArgument('flip', default_value='180',
+                              description='image_upright 회전(180|v|h|none). 실로봇 카메라 거꾸로면 180'),
         DeclareLaunchArgument('sim', default_value='true',
                               description='true=시뮬(gazebo) | false=실로봇(gazebo/spawn/rsp 안 띄움)'),
         DeclareLaunchArgument('gui', default_value='false',
@@ -161,5 +171,5 @@ def generate_launch_description():
         DeclareLaunchArgument('duration', default_value='600',
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         gzserver, gzclient, rsp, spawn, slam,
-        vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
+        upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
     ])

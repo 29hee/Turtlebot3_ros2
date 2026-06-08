@@ -47,6 +47,7 @@ class ImageUpright(Node):
 
         in_topic = self.get_parameter('in_topic').value
         out_topic = self.get_parameter('out_topic').value
+        self.out_topic = out_topic
         self.flip = str(self.get_parameter('flip').value).lower()
         self.compressed_in = bool(self.get_parameter('compressed_in').value)
         if self.flip not in ('180', 'v', 'h'):
@@ -71,6 +72,23 @@ class ImageUpright(Node):
         self.get_logger().info(
             f"image_upright 시작 — {src} → {out_topic}(+/compressed) "
             f"(flip={self.flip}, compressed_in={self.compressed_in})")
+
+        # ★ '순차 보장' 가드: out_topic 은 image_upright 만 발행해야 한다. v4l2 가 _rot 으로
+        #   remap 안 돼 같은 토픽을 직접 쏘면 발행자 2개 → 구독자가 거꾸로/똑바로 프레임을
+        #   '랜덤'으로 받게 된다(보정 깨짐). 주기적으로 발행자 수를 확인해 그 즉시 경고.
+        self._dup_warned = False
+        self.create_timer(3.0, self._check_single_publisher)
+
+    def _check_single_publisher(self):
+        n = self.count_publishers(self.out_topic)
+        if n > 1 and not self._dup_warned:
+            self._dup_warned = True
+            self.get_logger().error(
+                f"⚠ {self.out_topic} 발행자 {n}개! image_upright 외에 다른 노드(v4l2?)가 직접 발행 중 "
+                f"→ 거꾸로/똑바로 프레임이 랜덤으로 섞인다. v4l2 를 '/camera/image_raw_rot' 로 "
+                f"remap 했는지 확인: -r /image_raw:=/camera/image_raw_rot")
+        elif n <= 1:
+            self._dup_warned = False
 
     # ── 입력 두 경로 → 공통 처리 ────────────────────────────────────
     def cb_compressed(self, msg):
