@@ -353,20 +353,27 @@ class MazeTour(Node):
         kor = KOR.get(self.target, self.target)
 
         if self.target_digit is None:
-            # ── 전체 순회 모드: 발견 패스 → digit 오름차순 정렬 ──────
-            self.get_logger().info(
-                f'{kor} 전체 순회 — 먼저 각 벽의 숫자를 탐색합니다.')
-            nn_order = order_walls(walls, rxy)
-            digit_map = self._discover_digits(nn_order)
-            if not digit_map:
-                self.get_logger().error('숫자 감지 실패 — 순회 중단.')
-                return False
-            order = sorted(
-                [w for w in walls if w['id'] in digit_map],
-                key=lambda w: digit_map[w['id']])
-            ids = ' → '.join(
-                f'{kor}{digit_map[w["id"]]}({w["id"]}번)' for w in order)
-            self.get_logger().info(f'digit 순 방문 순서: {ids}')
+            # ── 전체 순회 모드 ────────────────────────────────────────
+            walls_with_digit = [w for w in walls if w.get('digit') is not None]
+            if len(walls_with_digit) == len(walls):
+                # 매핑 때 digit 저장됨 → 바로 정렬 (발견 패스 불필요)
+                order = sorted(walls, key=lambda w: w['digit'])
+                ids = ' → '.join(f'{kor}{w["digit"]}' for w in order)
+                self.get_logger().info(f'저장된 digit 순 방문: {ids}')
+            else:
+                # digit 정보 없음 → 발견 패스
+                self.get_logger().info(
+                    f'{kor} 전체 순회 — 각 벽의 숫자를 탐색합니다.')
+                nn_order = order_walls(walls, rxy)
+                digit_map = self._discover_digits(nn_order)
+                if not digit_map:
+                    self.get_logger().error('숫자 감지 실패 — 순회 중단.')
+                    return False
+                order = sorted(
+                    [w for w in walls if w['id'] in digit_map],
+                    key=lambda w: digit_map[w['id']])
+                ids = ' → '.join(f'{kor}{digit_map[w["id"]]}' for w in order)
+                self.get_logger().info(f'digit 순 방문 순서: {ids}')
         else:
             # ── 특정 숫자 모드: 해당 digit 벽만 찾아감 ───────────────
             order = order_walls(walls, rxy)

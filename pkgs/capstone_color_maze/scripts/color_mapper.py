@@ -39,7 +39,7 @@ import yaml
 from cv_bridge import CvBridge
 
 from sensor_msgs.msg import Image, LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Int32, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 import tf2_ros
@@ -110,6 +110,9 @@ class ColorMapper(Node):
         self.scan = None
         # 격자 투표: {(gx,gy): {'RED':n,'GREEN':n,'BLUE':n}}  gx,gy 는 칸 인덱스(int)
         self.votes = {}
+        # 격자별 digit 투표: {(gx,gy): {digit: count}}
+        self.digit_votes = {}
+        self._latest_digit = -1   # /detected_digit 최신값
 
         # TF
         self.tf_buffer = tf2_ros.Buffer()
@@ -118,6 +121,7 @@ class ColorMapper(Node):
         # I/O
         self.create_subscription(LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
         self.create_subscription(Image, self.image_topic, self.image_cb, qos_profile_sensor_data)
+        self.create_subscription(Int32, '/detected_digit', self._digit_cb, 10)
         self.pub_color = self.create_publisher(String, '/detected_color', 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/color_landmarks', 10)
         self.create_timer(self.save_period, self.save_cb)
@@ -127,6 +131,9 @@ class ColorMapper(Node):
             f"min_votes={self.min_votes}, 저장:{self.save_path}")
 
     # ──────────────────────────────────────────────────────────────
+    def _digit_cb(self, msg):
+        self._latest_digit = int(msg.data)
+
     def scan_cb(self, msg):
         self.scan = msg
 
@@ -202,10 +209,13 @@ class ColorMapper(Node):
         key = self.cell_of(x, y)
         cell = self.votes.setdefault(key, {c: 0 for c in COLOR_RANGES})
         cell[color] += 1
+        if self._latest_digit >= 0:
+            dcell = self.digit_votes.setdefault(key, {})
+            dcell[self._latest_digit] = dcell.get(self._latest_digit, 0) + 1
         self.publish_markers()
 
     def finalized(self):
-        """채택된 칸만: [(color, cx, cy, votes), ...]"""
+        """채택된 칸만: [(color, cx, cy, votes, digit_or_None), ...]"""
         out = []
         for (gx, gy), cnt in self.votes.items():
             total = sum(cnt.values())
@@ -213,7 +223,9 @@ class ColorMapper(Node):
                 continue
             color = max(cnt, key=cnt.get)
             cx, cy = self.cell_center(gx, gy)
-            out.append((color, cx, cy, cnt[color]))
+            dcell = self.digit_votes.get((gx, gy), {})
+            digit = max(dcell, key=dcell.get) if dcell else None
+            out.append((color, cx, cy, cnt[color], digit))
         return out
 
     # ── 출력 ──────────────────────────────────────────────────────
@@ -250,8 +262,11 @@ class ColorMapper(Node):
         if not fin:
             return
         data = {c: [] for c in COLOR_RANGES}
-        for color, cx, cy, v in fin:
-            data[color].append({'x': round(cx, 3), 'y': round(cy, 3), 'votes': v})
+        for color, cx, cy, v, digit in fin:
+            entry = {'x': round(cx, 3), 'y': round(cy, 3), 'votes': v}
+            if digit is not None:
+                entry['digit'] = digit
+            data[color].append(entry)
         try:
             os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
             with open(self.save_path, 'w') as f:
