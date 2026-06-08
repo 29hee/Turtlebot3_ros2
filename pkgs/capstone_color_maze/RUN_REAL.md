@@ -82,9 +82,9 @@ python3 scripts/digit_recognizer.py --ros-args -p use_sim_time:=false
 python3 scripts/maze_explorer.py --duration 600 --ros-args -p use_sim_time:=false
 #   끝나면 자동 정지(미방문 소진 또는 시간 상한). 중간에 멈추려면 Ctrl-C.
 
-# (터미널 F) 매핑 품질 라이브 점검 — 색별 벽수/숫자/누락을 주기적으로 출력.
-python3 scripts/quality_monitor.py --ros-args -p expect:="RED:3,GREEN:1,BLUE:2"
-#   ⚠ '미발견'/'숫자미상' 이 보이면 그 구역을 더 돌고 나서 맵 저장.
+# (터미널 F) 매핑 품질 라이브 점검 — 색별 벽수/숫자/누락 출력(기본 기대 = 색당 3개, 총 9).
+python3 scripts/quality_monitor.py
+#   '합계: 9/9 … ✅ 전부 확보' 가 떠야 완성. '미발견/숫자미상/부족/중복' 이 보이면 더 돌 것.
 
 # (터미널 G) 보면서 (맵 + 라이다 + 카메라 + 색 마커)
 rviz2 -d config/maze.rviz
