@@ -49,6 +49,9 @@ def generate_launch_description():
     explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
     # 탐사기 선택: maze(색-반응 근접캡처+안티스턱, 권장) | scan(구 느린360°스캔) | wall(단순 벽타기)
     explorer = LaunchConfiguration('explorer', default='maze')
+    # 가제보 GUI 창(gzclient) 표시 여부. 기본 false=안 띄움(물리 gzserver 는 그대로 동작).
+    #   로봇 움직임은 RViz(맵+라이다+색마커)로 보면 충분. 굳이 가제보 창 보려면 gui:=true.
+    gui = LaunchConfiguration('gui', default='false')
     # 종료는 본래 '미방문 소진'이지만 폭주 방지 시간 상한.
     duration = LaunchConfiguration('duration', default='600')
 
@@ -62,6 +65,7 @@ def generate_launch_description():
     )
     gzclient = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzclient.launch.py')),
+        condition=IfCondition(gui),     # gui:=true 일 때만 가제보 창 표시
     )
     rsp = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -132,6 +136,8 @@ def generate_launch_description():
                               description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
         DeclareLaunchArgument('explorer', default_value='maze',
                               description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
+        DeclareLaunchArgument('gui', default_value='false',
+                              description='가제보 GUI 창 표시(기본 false=안 띄움, RViz 로 관찰)'),
         DeclareLaunchArgument('duration', default_value='600',
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         gzserver, gzclient, rsp, spawn, slam,
