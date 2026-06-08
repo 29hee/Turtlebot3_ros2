@@ -22,9 +22,11 @@ source <워크스페이스>/install/setup.bash       # 이 노트북(PC): /home/
 > **숫자 인식 의존성(색 노드 돌리는 PC만, 1회).** 숫자는 `digit_recognizer.py` 가 EasyOCR 로 읽는다
 > (과거 MNIST CNN·Tesseract 폐기, EasyOCR 단일화).
 > ```bash
-> pip3 install easyocr        # 첫 실행 시 인식 모델 자동 다운로드(수십 MB, 1회)
+> pip3 install easyocr "numpy<2"   # easyocr 가 numpy 2.x 를 끌어올려 cv_bridge 를 깨므로 numpy<2 고정
 > ```
-> 미설치여도 색 인식은 정상 동작하고 숫자만 항상 -1 이 된다.
+> ⚠ numpy 가 2.x 면 cv_bridge 가 `_ARRAY_API not found`/segfault 로 죽어 vision_node 등이 안 뜬다.
+>   증상 보이면:  `pip3 install "numpy<2"`
+> easyocr 미설치여도 색 인식은 동작하지만, 색+숫자 필수라 숫자가 -1 이면 맵은 빈다.
 
 ## 1) 로봇(라즈베리파이) 측 — SSH
 ```bash
