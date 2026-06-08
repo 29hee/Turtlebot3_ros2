@@ -27,7 +27,7 @@ from launch.actions import (
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 
 def generate_launch_description():
@@ -37,11 +37,17 @@ def generate_launch_description():
     default_params = os.path.join(pkg, 'config', 'nav2_maze.yaml')
     color_confirm = os.path.join(pkg, 'scripts', 'color_confirm.py')
     maze_tour = os.path.join(pkg, 'scripts', 'maze_tour.py')
+    # 매핑과 동일한 비전 스택 — 런타임에서 '숫자(digit)' 기반 목표 확인에 필수.
+    vision_node = os.path.join(pkg, 'scripts', 'vision_node.py')
+    digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
+    image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     start_gazebo = LaunchConfiguration('start_gazebo', default='false')
     # 실로봇: 시작 시 제자리 회전으로 자기위치부터 찾기. 시뮬은 set_initial_pose 라 false.
     relocalize = LaunchConfiguration('relocalize', default='false')
+    # 거꾸로 장착 카메라 보정(image_upright). 실로봇(start_gazebo:=false)에서만 동작.
+    flip = LaunchConfiguration('flip', default='180')
     map_yaml = LaunchConfiguration('map', default=default_map)
     params_file = LaunchConfiguration('params_file', default=default_params)
     default_landmarks = os.path.join(pkg, 'maps', 'color_landmarks.yaml')
@@ -78,6 +84,24 @@ def generate_launch_description():
              '-p', 'oneshot:=false'],
         output='screen',
     )
+    # 거꾸로 장착 카메라를 똑바로 세워 /camera/image_raw 채움(실로봇 전용). 시뮬은 안 띄움.
+    upright_proc = ExecuteProcess(
+        cmd=['python3', image_upright, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['flip:=', flip], '-p', 'compressed_in:=false'],
+        condition=IfCondition(PythonExpression(["'", start_gazebo, "' == 'false'"])),
+        output='screen',
+    )
+    # 단일 디코더 — /color_signal(숫자 인식 근접게이트용) + /detected_color 발행.
+    vision_proc = ExecuteProcess(
+        cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        output='screen',
+    )
+    # 숫자 인식기(EasyOCR) — /detected_digit 발행. '특정 숫자+색' 목표 확인에 필수.
+    digit_proc = ExecuteProcess(
+        cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        output='screen',
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
@@ -85,6 +109,8 @@ def generate_launch_description():
                               description='시뮬레이션이면 true, 실로봇이면 false(기본)'),
         DeclareLaunchArgument('relocalize', default_value='false',
                               description='실로봇이면 true: 시작 시 제자리 회전으로 자기위치 추정'),
+        DeclareLaunchArgument('flip', default_value='180',
+                              description='image_upright 회전(180|v|h). 실로봇 카메라 거꾸로면 180'),
         DeclareLaunchArgument('map', default_value=default_map),
         DeclareLaunchArgument('landmarks', default_value=default_landmarks,
                               description='색 시맨틱맵(color_landmarks.yaml) 경로'),
@@ -93,4 +119,7 @@ def generate_launch_description():
         nav2,
         confirm_proc,
         tour_proc,
+        upright_proc,
+        vision_proc,
+        digit_proc,
     ])

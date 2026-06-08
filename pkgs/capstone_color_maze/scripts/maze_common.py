@@ -25,13 +25,32 @@ import math
 # 조명/카메라가 바뀌면 color_detector.py(-p show:=true)로 마스크 보며 S_min 부터 재보정.
 COLOR_RANGES = {
     # 빨강은 Hue 가 0 부근에서 끊겨 양끝 두 구간을 OR.
-    'RED':   [((0,   150, 80),  (10,  255, 255)),
-             ((170, 150, 80),  (179, 255, 255))],
-    'GREEN': [((40,  130, 80),  (80,  255, 255))],
-    'BLUE':  [((100, 150, 80),  (128, 255, 255))],
+    # ※ '진한 색만' 통과하도록 H 폭을 좁히고 S_min/V_min 을 올렸다(흰벽/허연 반사 차단).
+    #   너무 좁혀 패널이 안 잡히면 vision_node 의 show 로 마스크 보며 S_min 부터 천천히 낮출 것:
+    #     python3 scripts/vision_node.py --ros-args -p show:=true
+    'RED':   [((0,   170, 90),  (8,   255, 255)),
+             ((172, 170, 90),  (179, 255, 255))],
+    'GREEN': [((45,  150, 90),  (78,  255, 255))],
+    'BLUE':  [((102, 170, 90),  (126, 255, 255))],
 }
 
 VALID_COLORS = ('RED', 'GREEN', 'BLUE')
+
+# /color_signal(Float32MultiArray) 의 color_id 단일 출처. index = id (0=NONE).
+# vision_node 가 발행, maze_explorer 등이 해석할 때 같은 표를 쓰도록 여기 둔다.
+COLOR_IDS = ('NONE',) + VALID_COLORS   # ('NONE','RED','GREEN','BLUE')
+
+
+def color_to_id(c):
+    """'RED' → 1 등. 유효하지 않으면 0(NONE)."""
+    return COLOR_IDS.index(c) if c in COLOR_IDS else 0
+
+
+def id_to_color(i):
+    """1 → 'RED' 등. 범위 밖이면 'NONE'."""
+    i = int(i)
+    return COLOR_IDS[i] if 0 <= i < len(COLOR_IDS) else 'NONE'
+
 
 # 사양 목표: "target-color HSV mask must cover at least 60% of the camera frame".
 # 현재값 = 0.30 (임시). burger_cam 은 fov 약 182° 초광각이라 작품을 정면에서 봐도

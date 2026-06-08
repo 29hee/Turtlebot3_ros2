@@ -91,8 +91,13 @@ class MissionExecutor(Node):
 
     # ── 유틸 ──────────────────────────────────────────────────────
     def load_landmarks(self):
-        with open(self.landmarks_path) as f:
-            data = yaml.safe_load(f) or {}
+        # 파일 없음/깨짐이 노드를 죽이지 않게 가드 → run() 의 'cells 없음' 분기로 안전 처리.
+        try:
+            with open(self.landmarks_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            self.get_logger().error(f'색맵 읽기 실패({e})')
+            return []
         return data.get(self.target) or []
 
     def get_robot_xy(self, timeout=10.0):

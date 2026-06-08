@@ -115,6 +115,10 @@ class MazeTour(Node):
         # ── 상태/IO ───────────────────────────────────────────────
         self._confirmed_now = False        # /target_confirmed 최신값
         self._detected_digit = -1          # /detected_digit 최신값 (-1=없음)
+        # 특정 숫자 모드에서 '저장된 landmark digit' 으로 목표를 정한 경우 True.
+        #   이때는 라이브 OCR(/detected_digit) 없이 색 확인만으로 도착을 인정한다
+        #   (런타임에 숫자가 잠깐 안 읽혀도 매핑 때 확정한 digit 을 신뢰).
+        self.target_digit_known = False
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -167,9 +171,18 @@ class MazeTour(Node):
         return pos_std <= self.relocalize_pos_std and yaw_std <= self.relocalize_yaw_std
 
     def load_target_walls(self):
-        """원시 셀을 클러스터링/필터해 '진짜 벽'(각 벽에 안정 id 부여)으로 반환."""
-        with open(self.landmarks_path) as f:
-            data = yaml.safe_load(f) or {}
+        """원시 셀을 클러스터링/필터해 '진짜 벽'(각 벽에 안정 id 부여)으로 반환.
+        파일이 없거나 깨져도 노드를 죽이지 않고 빈 리스트(=no-match) 로 안전 처리."""
+        try:
+            with open(self.landmarks_path) as f:
+                data = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            self.get_logger().error(
+                f'색맵 파일 없음: {self.landmarks_path} — 먼저 매핑을 돌려 생성할 것')
+            return []
+        except Exception as e:
+            self.get_logger().error(f'색맵 읽기 실패({e}) — no-match 처리')
+            return []
         return resolve_target_walls(data, self.target)
 
     def get_robot_xy(self, timeout=10.0):
@@ -218,14 +231,18 @@ class MazeTour(Node):
     def await_confirmation(self):
         """도착 후 confirm_window 초간 색(+숫자) 확인.
         - target_digit 없음: 색 확인만 (기존 동작)
-        - target_digit 있음: 색 확인 AND 숫자 일치 둘 다 만족해야 True"""
+        - target_digit 있고 저장 digit 으로 목표 선정(target_digit_known): 색 확인만
+          (숫자는 매핑 때 확정됐으므로 라이브 OCR 불필요)
+        - target_digit 있고 저장 digit 없음: 색 확인 AND 라이브 숫자 일치 둘 다 만족"""
+        need_live_digit = (self.target_digit is not None
+                           and not self.target_digit_known)
         self._confirmed_now = False
         true_count = 0
         end = time.time() + self.confirm_window
         while time.time() < end and rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
             color_ok = self._confirmed_now
-            digit_ok = (self.target_digit is None or
+            digit_ok = (not need_live_digit or
                         self._detected_digit == self.target_digit)
             if color_ok and digit_ok:
                 true_count += 1
@@ -300,7 +317,12 @@ class MazeTour(Node):
             self.target_digit = self.pending_digit
             self.pending_color = None
             self.pending_digit = None
-            self.run_tour()
+            # 한 번의 순회에서 어떤 예외가 나도 서비스 노드 자체는 살아남아 다음 색을
+            # 계속 받도록 가드(매핑/맵 품질 문제로 죽어버리면 재시작 부담이 큼).
+            try:
+                self.run_tour()
+            except Exception as e:
+                self.get_logger().error(f'순회 중 예외 — 무시하고 다음 색 대기: {e}')
             if self.oneshot:
                 self.get_logger().info('oneshot=true → 순회 1회 후 종료')
                 return
@@ -335,6 +357,7 @@ class MazeTour(Node):
     def run_tour(self):
         self.get_logger().info(f'=== 색벽 순회 시작: target = {self.target} ===')
         self.pub_done.publish(Bool(data=False))   # 새 미션 시작 → done 리셋
+        self.target_digit_known = False           # 이전 순회 상태 이월 방지
 
         walls = self.load_target_walls()
         if not walls:
@@ -375,10 +398,22 @@ class MazeTour(Node):
                 ids = ' → '.join(f'{kor}{digit_map[w["id"]]}' for w in order)
                 self.get_logger().info(f'digit 순 방문 순서: {ids}')
         else:
-            # ── 특정 숫자 모드: 해당 digit 벽만 찾아감 ───────────────
-            order = order_walls(walls, rxy)
-            self.get_logger().info(
-                f'{kor} {self.target_digit}번 탐색 — {len(order)}개 벽 순회')
+            # ── 특정 숫자 모드: 해당 digit 벽으로 바로 이동 ───────────────
+            # 매핑 때 저장된 digit 을 '우선' 사용한다 → 라이브 OCR 의존 제거. 런타임에
+            # digit_recognizer 가 잠깐 못 읽어도 매핑에서 확정한 벽으로 직행할 수 있다.
+            # 저장 digit 이 전혀 없을 때만 모든 벽을 돌며 라이브 OCR 로 확인하는 폴백.
+            matched = [w for w in walls if w.get('digit') == self.target_digit]
+            if matched:
+                order = order_walls(matched, rxy)
+                self.target_digit_known = True   # 도착 확인은 색만(숫자는 맵으로 확정)
+                self.get_logger().info(
+                    f'{kor} {self.target_digit}번 — 저장 digit 일치 {len(order)}개 후보로 직행')
+            else:
+                order = order_walls(walls, rxy)
+                self.target_digit_known = False
+                self.get_logger().info(
+                    f'{kor} {self.target_digit}번 — 저장 digit 없음, '
+                    f'라이브 OCR 로 {len(order)}개 벽 탐색')
 
         confirmed = []          # [(id, x, y, ax, ay, yaw), ...] 확인된 벽
         failed = []             # [(id, 사유), ...] 접근/확인 실패한 벽
