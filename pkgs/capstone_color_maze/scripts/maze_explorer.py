@@ -75,6 +75,11 @@ class MazeExplorer(Node):
         # 색 접근이 이 시간 안에 근접(standoff) 도달 못 하면 포기하고 벽타기 복귀.
         #   (어안렌즈로 색 중심 정렬이 안 돼 제자리 회전만 하는 무한루프 방지.)
         self.declare_parameter('approach_timeout', 12.0)
+        # ── 센서/odom 생존 워치독 ────────────────────────────────────
+        #   라이다(/scan)나 위치(TF map→base_link)가 끊기면(예: turtlebot3_node 배터리로
+        #   사망, 라이다 멈춤) '탐사 중'으로 착각하며 헛돌지 않게 즉시 정지+경고한다.
+        self.declare_parameter('sensor_timeout', 3.0)    # /scan 이 이 시간 끊기면 정지 [s]
+        self.declare_parameter('pose_lost_limit', 12.0)  # TF 위치가 이 시간 끊기면 정지+경고 [s]
 
         self.total = duration
         self.v_fwd = float(self.get_parameter('v_fwd').value)
@@ -92,6 +97,8 @@ class MazeExplorer(Node):
         self.loop_close_dist = float(self.get_parameter('loop_close_dist').value)
         self.tf_lost_spin = float(self.get_parameter('tf_lost_spin').value)
         self.approach_timeout = float(self.get_parameter('approach_timeout').value)
+        self.sensor_timeout = float(self.get_parameter('sensor_timeout').value)
+        self.pose_lost_limit = float(self.get_parameter('pose_lost_limit').value)
 
         # ── IO ───────────────────────────────────────────────────────
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
@@ -125,6 +132,11 @@ class MazeExplorer(Node):
         self._last_signal_time = None
         self._last_sig_warn = 0.0
         self._last_phase_pub = 0.0
+        # 센서/odom 워치독 상태
+        self._last_scan_t = None       # 마지막 /scan 수신 시각
+        self._pose_lost_since = None   # TF 위치 끊김 시작 시각
+        self._last_sensor_warn = 0.0
+        self._last_pose_warn = 0.0
         self.get_logger().info(
             f"maze_explorer 시작 — 색-반응 매핑, total(상한)={self.total:.0f}s, "
             f"standoff={self.standoff}m, stuck<{self.stuck_dist}m/{self.stuck_win:.0f}s")
@@ -139,6 +151,7 @@ class MazeExplorer(Node):
 
     def on_scan(self, msg):
         self.scan = msg
+        self._last_scan_t = self.now()   # 센서 워치독용 생존 표시
 
     def on_signal(self, msg):
         """vision_node 의 [color_id, cx_norm, coverage] → 비주얼 서보/발견 신호.
@@ -256,6 +269,17 @@ class MazeExplorer(Node):
         if self.scan is None:
             return
 
+        # ★ 센서 워치독: /scan 이 sensor_timeout 이상 끊기면 정지(stale scan 으로 헛돌기 방지).
+        if (self._last_scan_t is not None
+                and self.elapsed(self._last_scan_t) > self.sensor_timeout):
+            self.pub.publish(Twist())
+            now_s = self.elapsed(self.start)
+            if now_s - self._last_sensor_warn > 5.0:
+                self._last_sensor_warn = now_s
+                self.get_logger().error(
+                    f'/scan {self.sensor_timeout:.0f}s+ 끊김 — 라이다/로봇 bringup 확인. 정지.')
+            return
+
         # ★ 색 신호(/color_signal) 생존 감시 — 이게 없으면 색을 못 봐 'approach' 자체가 불가.
         #   (조용히 벽만 도는 대신 큰 소리로 알려 vision_node 누락/사망을 즉시 드러낸다.)
         now_s = self.elapsed(self.start)
@@ -276,15 +300,31 @@ class MazeExplorer(Node):
 
         pose = self.get_pose()
 
-        # 1) TF 끊김 — '무한 제자리 회전 금지'(D). 짧게만 돌고, 그 뒤엔 느린 전진으로 칸 변경.
+        # 1) TF 위치 끊김 처리.
         if pose is None:
+            if self._pose_lost_since is None:
+                self._pose_lost_since = self.now()
+            lost_for = self.elapsed(self._pose_lost_since)
+            if lost_for > self.pose_lost_limit:
+                # 장기 끊김 = 일시적 SLAM 흔들림이 아니라 odom/TF 사망(예: turtlebot3_node
+                #   배터리로 죽음). '장님 주행' 금지 — 정지하고 큰 소리로 알린다.
+                self.pub.publish(Twist())
+                now_s = self.elapsed(self.start)
+                if now_s - self._last_pose_warn > 5.0:
+                    self._last_pose_warn = now_s
+                    self.get_logger().error(
+                        f'위치(TF map→base_link) {lost_for:.0f}s 끊김 — odom/SLAM 사망 의심 '
+                        f'(turtlebot3_node·배터리 확인). 정지.')
+                return
+            # 단기 끊김 — '무한 제자리 회전 금지'(D). 짧게만 돌고, 그 뒤엔 느린 전진으로 칸 변경.
             c = Twist()
-            if self.elapsed(self.phase_start) < self.tf_lost_spin:
+            if lost_for < self.tf_lost_spin:
                 c.angular.z = self.spin_speed
             else:
                 c.linear.x = 0.08      # 칸을 바꿔 SLAM 재수렴 유도(제자리 회전은 정보 0)
             self.pub.publish(c)
             return
+        self._pose_lost_since = None   # 위치 정상 → 끊김 타이머 리셋
 
         # 방문 격자 기록
         self.visited.add(self.cell(pose[0], pose[1]))
