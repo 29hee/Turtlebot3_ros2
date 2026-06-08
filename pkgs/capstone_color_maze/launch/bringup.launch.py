@@ -24,8 +24,10 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     IncludeLaunchDescription, DeclareLaunchArgument, ExecuteProcess,
+    RegisterEventHandler, Shutdown,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 
@@ -41,11 +43,15 @@ def generate_launch_description():
     vision_node = os.path.join(pkg, 'scripts', 'vision_node.py')
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
     image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
+    mode_guard = os.path.join(pkg, 'scripts', 'mode_guard.py')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     start_gazebo = LaunchConfiguration('start_gazebo', default='false')
     # 실로봇: 시작 시 제자리 회전으로 자기위치부터 찾기. 시뮬은 set_initial_pose 라 false.
-    relocalize = LaunchConfiguration('relocalize', default='false')
+    # ★ 기본값을 start_gazebo 에 연동(실로봇=true, 시뮬=false). 명시 지정 시 우선.
+    _reloc_default = PythonExpression(
+        ["'true' if '", start_gazebo, "' == 'false' else 'false'"])
+    relocalize = LaunchConfiguration('relocalize', default=_reloc_default)
     # 거꾸로 장착 카메라 보정(image_upright). 실로봇(start_gazebo:=false)에서만 동작.
     flip = LaunchConfiguration('flip', default='180')
     map_yaml = LaunchConfiguration('map', default=default_map)
@@ -102,19 +108,30 @@ def generate_launch_description():
         cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         output='screen',
     )
+    # ── 모드 가드: 매핑 스택(slam_toolbox/maze_explorer/color_mapper)이 떠 있으면 차단 ──
+    guard_proc = ExecuteProcess(
+        cmd=['python3', mode_guard, '--expect', 'runtime'], output='screen')
+
+    def _guard_exit(event, context):
+        if event.returncode != 0:
+            return [Shutdown(reason='mode_guard: 매핑과 동시구동 충돌 — 런타임 시작 중단')]
+        return []
+    guard_handler = RegisterEventHandler(
+        OnProcessExit(target_action=guard_proc, on_exit=_guard_exit))
 
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('start_gazebo', default_value='false',
                               description='시뮬레이션이면 true, 실로봇이면 false(기본)'),
-        DeclareLaunchArgument('relocalize', default_value='false',
-                              description='실로봇이면 true: 시작 시 제자리 회전으로 자기위치 추정'),
+        DeclareLaunchArgument('relocalize', default_value=_reloc_default,
+                              description='기본: 실로봇(start_gazebo:=false)=true, 시뮬=false. 시작 시 자기위치 추정'),
         DeclareLaunchArgument('flip', default_value='180',
                               description='image_upright 회전(180|v|h). 실로봇 카메라 거꾸로면 180'),
         DeclareLaunchArgument('map', default_value=default_map),
         DeclareLaunchArgument('landmarks', default_value=default_landmarks,
                               description='색 시맨틱맵(color_landmarks.yaml) 경로'),
         DeclareLaunchArgument('params_file', default_value=default_params),
+        guard_proc, guard_handler,
         gazebo,
         nav2,
         confirm_proc,

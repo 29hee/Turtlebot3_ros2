@@ -19,7 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     IncludeLaunchDescription, DeclareLaunchArgument, ExecuteProcess,
-    SetEnvironmentVariable, RegisterEventHandler,
+    SetEnvironmentVariable, RegisterEventHandler, Shutdown,
 )
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
@@ -44,6 +44,7 @@ def generate_launch_description():
     quality_monitor = os.path.join(pkg, 'scripts', 'quality_monitor.py')
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
     image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
+    mode_guard = os.path.join(pkg, 'scripts', 'mode_guard.py')
 
     # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
     #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
@@ -164,6 +165,17 @@ def generate_launch_description():
                  '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
             output='screen',
         )
+    # ── 모드 가드: 런타임 스택(AMCL/Nav2/maze_tour)이 떠 있으면 매핑 시작 차단 ──
+    guard_proc = ExecuteProcess(
+        cmd=['python3', mode_guard, '--expect', 'mapping'], output='screen')
+
+    def _guard_exit(event, context):
+        if event.returncode != 0:
+            return [Shutdown(reason='mode_guard: 런타임과 동시구동 충돌 — 매핑 시작 중단')]
+        return []
+    guard_handler = RegisterEventHandler(
+        OnProcessExit(target_action=guard_proc, on_exit=_guard_exit))
+
     save_on_maze = RegisterEventHandler(
         OnProcessExit(target_action=maze_proc, on_exit=[_map_saver()]))
     save_on_scan = RegisterEventHandler(
@@ -192,6 +204,7 @@ def generate_launch_description():
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         DeclareLaunchArgument('map_save', default_value=os.path.join(pkg, 'maps', 'color_room'),
                               description='탐사 종료 시 점유격자맵 저장 경로(확장자 없이)'),
+        guard_proc, guard_handler,
         gzserver, gzclient, rsp, spawn, slam,
         upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
         save_on_maze, save_on_scan, save_on_wall,
