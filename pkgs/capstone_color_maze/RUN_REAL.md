@@ -57,6 +57,18 @@ python3 scripts/image_upright.py
 
 ---
 
+## 1.7) PC — 사전 점검 (매핑 시작 전 1회, 권장)
+> 그동안 런타임에서 하나씩 터지던 '조용한 실패'(numpy 충돌·카메라 안뜸/느림·로봇 미연결·
+> TF 없음·클럭 skew)를 시작 전에 한 번에 잡는다. ❌ 부터 해결하고 매핑 시작.
+```bash
+cd /home/user/workspace/co_project/pkgs/capstone_color_maze
+python3 scripts/preflight.py
+#   [1]의존성 [2]/camera·/scan Hz [3]TF [4]Pi↔PC 클럭 [5]로봇 cmd_vel 수신 을 점검.
+#   카메라가 5Hz 미만이면 색을 놓치니 v4l2 해상도↓/fps↑ 로 올릴 것.
+```
+
+---
+
 ## 2) PC — Phase 1: 자율주행 SLAM 매핑 (한 번)
 > 시뮬 맵 재사용 금지 → 실제 공간을 새로 매핑. `scan_explorer`가 **자율로 로봇을 움직이므로**
 > 매핑 중엔 **주변에 사람을 비우고, Ctrl-C(비상정지) 대기**할 것.
