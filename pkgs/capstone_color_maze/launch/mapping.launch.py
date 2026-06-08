@@ -49,8 +49,6 @@ def generate_launch_description():
     explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
     # 탐사기 선택: maze(색-반응 근접캡처+안티스턱, 권장) | scan(구 느린360°스캔) | wall(단순 벽타기)
     explorer = LaunchConfiguration('explorer', default='maze')
-    # 숫자(EasyOCR) 인식기 동반 여부. 패널에 숫자가 있을 때만 true(첫 실행 시 모델 다운로드).
-    digit = LaunchConfiguration('digit', default='false')
     # 종료는 본래 '미방문 소진'이지만 폭주 방지 시간 상한.
     duration = LaunchConfiguration('duration', default='600')
 
@@ -108,12 +106,9 @@ def generate_launch_description():
         cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
-    # require_digit 를 digit 플래그와 묶는다 — digit:=false 면 색만 저장(빈 맵 방지),
-    #   digit:=true 면 '색+숫자 둘 다' 인식된 칸만 저장.
+    # color_mapper 는 '색+숫자 둘 다' 인식된 칸만 저장(무조건) → digit_recognizer 가 필수다.
     mapper_proc = ExecuteProcess(
-        cmd=['python3', color_mapper, '--ros-args',
-             '-p', ['use_sim_time:=', use_sim_time],
-             '-p', ['require_digit:=', digit]],
+        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
     # 매핑 중 라이브 품질 체크리스트(색별 벽수/digit/누락 경고).
@@ -121,10 +116,11 @@ def generate_launch_description():
         cmd=['python3', quality_monitor],
         condition=IfCondition(explore), output='screen',
     )
-    # 숫자 인식기(EasyOCR) — digit:=true 일 때만. /detected_digit 발행 → color_mapper 가 격자 digit 투표.
+    # 숫자 인식기(EasyOCR) — 색+숫자 둘 다 저장이 필수이므로 매핑에 '상시' 동반.
+    #   /detected_digit 발행 → color_mapper 가 격자 digit 투표. (EasyOCR 미설치면 맵이 빈다.)
     digit_proc = ExecuteProcess(
         cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
-        condition=IfCondition(digit), output='screen',
+        condition=IfCondition(explore), output='screen',
     )
 
     return LaunchDescription([
@@ -136,8 +132,6 @@ def generate_launch_description():
                               description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
         DeclareLaunchArgument('explorer', default_value='maze',
                               description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
-        DeclareLaunchArgument('digit', default_value='false',
-                              description='true=EasyOCR 숫자 인식기 동반(패널에 숫자 있을 때)'),
         DeclareLaunchArgument('duration', default_value='600',
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         gzserver, gzclient, rsp, spawn, slam,
