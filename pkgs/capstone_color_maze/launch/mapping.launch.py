@@ -19,9 +19,10 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     IncludeLaunchDescription, DeclareLaunchArgument, ExecuteProcess,
-    SetEnvironmentVariable,
+    SetEnvironmentVariable, RegisterEventHandler,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 
@@ -63,6 +64,9 @@ def generate_launch_description():
     gui = LaunchConfiguration('gui', default='false')
     # 종료는 본래 '미방문 소진'이지만 폭주 방지 시간 상한.
     duration = LaunchConfiguration('duration', default='600')
+    # 탐사 종료 시 점유격자맵을 저장할 경로(확장자 없이). 런타임 기본맵과 '같은 이름'으로
+    #   덮어써, 방금 만든 점유맵 + color_landmarks.yaml 이 같은 SLAM 좌표 한 쌍이 되게 한다.
+    map_save = LaunchConfiguration('map_save', default=os.path.join(pkg, 'maps', 'color_room'))
 
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
@@ -151,6 +155,22 @@ def generate_launch_description():
         condition=IfCondition(explore), output='screen',
     )
 
+    # ── 탐사 종료 → 점유격자맵 자동저장 (맵 핸드오프 자동화) ──────────────────
+    #   탐사기(maze/scan/wall 중 실행된 것)가 끝나면 map_saver_cli 로 /map 을 저장한다.
+    #   '미방문 소진/시간상한'으로 정상 종료될 때 저장됨. (수동 map_saver 깜빡 방지.)
+    def _map_saver():
+        return ExecuteProcess(
+            cmd=['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', map_save,
+                 '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+            output='screen',
+        )
+    save_on_maze = RegisterEventHandler(
+        OnProcessExit(target_action=maze_proc, on_exit=[_map_saver()]))
+    save_on_scan = RegisterEventHandler(
+        OnProcessExit(target_action=scan_proc, on_exit=[_map_saver()]))
+    save_on_wall = RegisterEventHandler(
+        OnProcessExit(target_action=wf_proc, on_exit=[_map_saver()]))
+
     return LaunchDescription([
         # 자식 프로세스(gzserver/스폰)도 카메라 모델을 상속받도록 런치 환경에 고정
         SetEnvironmentVariable('TURTLEBOT3_MODEL', ROBOT_MODEL),
@@ -170,6 +190,9 @@ def generate_launch_description():
                               description='가제보 GUI 창 표시(기본 false=안 띄움, RViz 로 관찰)'),
         DeclareLaunchArgument('duration', default_value='600',
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
+        DeclareLaunchArgument('map_save', default_value=os.path.join(pkg, 'maps', 'color_room'),
+                              description='탐사 종료 시 점유격자맵 저장 경로(확장자 없이)'),
         gzserver, gzclient, rsp, spawn, slam,
         upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
+        save_on_maze, save_on_scan, save_on_wall,
     ])
