@@ -41,12 +41,12 @@ import yaml
 import tf2_ros
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion, Twist, PoseWithCovarianceStamped
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Int32, String
 from std_srvs.srv import Empty
 from nav2_msgs.action import NavigateToPose
 
 from maze_common import (
-    normalize_color, approach_pose, order_walls, resolve_target_walls,
+    normalize_color, parse_target, approach_pose, order_walls, resolve_target_walls,
     CONFIRM_THRESHOLD,
 )
 
@@ -96,7 +96,9 @@ class MazeTour(Node):
         self.declare_parameter('relocalize_pos_std', 0.25)   # 위치 표준편차 임계 [m]
         self.declare_parameter('relocalize_yaw_std', 0.35)   # yaw 표준편차 임계 [rad]
 
-        self.target = normalize_color(self.get_parameter('target_color').value)
+        init_color, init_digit = parse_target(self.get_parameter('target_color').value)
+        self.target = init_color
+        self.target_digit = init_digit      # None 이면 색만 확인, 정수면 색+숫자 확인
         self.oneshot = bool(self.get_parameter('oneshot').value)
         self.landmarks_path = self.get_parameter('landmarks_path').value
         self.standoff = float(self.get_parameter('standoff').value)
@@ -112,10 +114,12 @@ class MazeTour(Node):
 
         # ── 상태/IO ───────────────────────────────────────────────
         self._confirmed_now = False        # /target_confirmed 최신값
+        self._detected_digit = -1          # /detected_digit 최신값 (-1=없음)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.create_subscription(Bool, '/target_confirmed', self._on_confirmed, 10)
+        self.create_subscription(Int32, '/detected_digit', self._on_digit, 10)
         # relocalization 용: 제자리 회전 명령 + AMCL 전역 재초기화 서비스 + 공분산 모니터
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.global_loc = self.create_client(Empty, '/reinitialize_global_localization')
@@ -128,23 +132,30 @@ class MazeTour(Node):
         self.pub_done = self.create_publisher(Bool, '/maze_done', latched)
         # 런타임 색 지정: /target_color(RED/GREEN/BLUE) 를 받으면 그 색 순회를 예약한다.
         self.pending_color = None
+        self.pending_digit = None
         self.create_subscription(String, '/target_color', self._on_target_color, 10)
 
     # ── 콜백/유틸 ─────────────────────────────────────────────────
     def _on_confirmed(self, msg):
         self._confirmed_now = bool(msg.data)
 
+    def _on_digit(self, msg):
+        self._detected_digit = int(msg.data)
+
     def _on_amcl(self, msg):
         self._amcl_cov = msg.pose.covariance   # 길이 36 (행우선 6x6)
 
     def _on_target_color(self, msg):
-        """런타임 색 지정. 다음 순회로 예약(현재 순회 중이면 끝난 뒤 처리)."""
-        c = normalize_color(msg.data)
+        """런타임 타겟 지정. 'RED' 또는 'RED_1' 형식 모두 수신.
+        다음 순회로 예약(현재 순회 중이면 끝난 뒤 처리)."""
+        c, d = parse_target(msg.data)
         if c is None:
-            self.get_logger().warn(f'/target_color 무시(RED/GREEN/BLUE 아님): {msg.data!r}')
+            self.get_logger().warn(f'/target_color 무시(유효하지 않은 형식): {msg.data!r}')
             return
         self.pending_color = c
-        self.get_logger().info(f'/target_color 수신: {c} → 순회 예약')
+        self.pending_digit = d
+        label = f'{c}_{d}' if d is not None else c
+        self.get_logger().info(f'/target_color 수신: {label} → 순회 예약')
 
     def _amcl_converged(self):
         """AMCL 위치/yaw 표준편차가 둘 다 임계 이하면 True (수렴)."""
@@ -205,14 +216,18 @@ class MazeTour(Node):
         return ok
 
     def await_confirmation(self):
-        """도착 후 confirm_window 초간 /target_confirmed 를 관측해 확인 여부 판정.
-        True 표본이 confirm_min_true 이상이면 확인된 것으로 본다(스파이크 방지)."""
+        """도착 후 confirm_window 초간 색(+숫자) 확인.
+        - target_digit 없음: 색 확인만 (기존 동작)
+        - target_digit 있음: 색 확인 AND 숫자 일치 둘 다 만족해야 True"""
         self._confirmed_now = False
         true_count = 0
         end = time.time() + self.confirm_window
         while time.time() < end and rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
-            if self._confirmed_now:
+            color_ok = self._confirmed_now
+            digit_ok = (self.target_digit is None or
+                        self._detected_digit == self.target_digit)
+            if color_ok and digit_ok:
                 true_count += 1
                 if true_count >= self.confirm_min_true:
                     return True
@@ -274,6 +289,7 @@ class MazeTour(Node):
             self.relocalize_in_place()
         if self.target is not None:   # 파라미터로 초기 색을 줬으면 첫 미션 예약
             self.pending_color = self.target
+            self.pending_digit = self.target_digit
         self.get_logger().info(
             'maze_tour 대기 — /target_color 로 색 지정 (RED/GREEN/BLUE)')
         while rclpy.ok():
@@ -281,7 +297,9 @@ class MazeTour(Node):
             if self.pending_color is None:
                 continue
             self.target = self.pending_color
+            self.target_digit = self.pending_digit
             self.pending_color = None
+            self.pending_digit = None
             self.run_tour()
             if self.oneshot:
                 self.get_logger().info('oneshot=true → 순회 1회 후 종료')

@@ -50,6 +50,26 @@ def normalize_color(name):
     return c if c in VALID_COLORS else None
 
 
+def parse_target(s):
+    """'RED_1' / 'RED 1' / 'RED' → (color, digit).
+    digit 없으면 None. 색이 유효하지 않으면 (None, None).
+    예: 'RED_1' → ('RED', 1),  'GREEN' → ('GREEN', None)
+    """
+    if not s:
+        return None, None
+    parts = str(s).strip().upper().replace(' ', '_').split('_', 1)
+    color = normalize_color(parts[0])
+    if color is None:
+        return None, None
+    digit = None
+    if len(parts) == 2:
+        try:
+            digit = int(parts[1])
+        except ValueError:
+            pass
+    return color, digit
+
+
 def is_confirmed(coverage, threshold=CONFIRM_THRESHOLD):
     """프레임 대비 마스크 비율 coverage(0~1)가 임계 이상이면 True.
     사양은 '>= 60%' 이므로 경계값(정확히 0.60)은 확인으로 친다."""
