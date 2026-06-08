@@ -37,11 +37,15 @@ class VisionNode(Node):
         self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('roi_ratio', 0.7)     # 중앙 ROI 한 변 비율
         self.declare_parameter('min_ratio', 0.03)    # 이 점유율 미만이면 NONE(작은 색도 잡게 낮춤)
+        # 거꾸로 장착 카메라 보정. image_upright 를 안 쓰면 여기서 직접 뒤집는다(실로봇=true).
+        # ★ 색은 방향 무관이지만 blob 중심 cx 는 180° 에서 부호가 뒤집혀 서보 방향이 반대가 됨 → 필수.
+        self.declare_parameter('rotate_180', False)
         self.declare_parameter('show', False)
 
         self.image_topic = self.get_parameter('image_topic').value
         self.roi_ratio = float(self.get_parameter('roi_ratio').value)
         self.min_ratio = float(self.get_parameter('min_ratio').value)
+        self.rotate_180 = bool(self.get_parameter('rotate_180').value)
         self.show = bool(self.get_parameter('show').value)
 
         self.bridge = CvBridge()
@@ -57,6 +61,8 @@ class VisionNode(Node):
         except Exception as e:
             self.get_logger().warn(f"cv_bridge 변환 실패: {e}")
             return
+        if self.rotate_180:                       # 거꾸로 장착 카메라 보정(image_upright 대용)
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
         h, w = frame.shape[:2]
         rw, rh = int(w * self.roi_ratio), int(h * self.roi_ratio)
         x0, y0 = (w - rw) // 2, (h - rh) // 2

@@ -259,14 +259,14 @@ class MazeExplorer(Node):
         # ★ 색 신호(/color_signal) 생존 감시 — 이게 없으면 색을 못 봐 'approach' 자체가 불가.
         #   (조용히 벽만 도는 대신 큰 소리로 알려 vision_node 누락/사망을 즉시 드러낸다.)
         now_s = self.elapsed(self.start)
+        # 카메라가 느리면(1~2Hz) 정상에도 몇 초 공백이 난다 → 8s 임계 + 시작 유예로 오발 방지.
         stale = (self._last_signal_time is None
-                 or self.elapsed(self._last_signal_time) > 3.0)
-        if stale and now_s - self._last_sig_warn > 5.0:
+                 or self.elapsed(self._last_signal_time) > 8.0)
+        if now_s > 12.0 and stale and now_s - self._last_sig_warn > 15.0:
             self._last_sig_warn = now_s
-            self.get_logger().error(
-                "⚠ /color_signal 안 들어옴 → 색을 못 봐 패널 접근 불가(OCR도 불가). "
-                "vision_node 가 떠 있는지 확인: ros2 node list | grep vision_node "
-                "(없으면 mapping.launch 로 띄우거나 vision_node.py 실행; numpy<2 필요)")
+            self.get_logger().warn(
+                "/color_signal 8s+ 끊김 — vision_node 생존/카메라 Hz 확인 "
+                "(카메라가 매우 느리면 정상일 수 있음).")
 
         # 현재 상태를 1초마다 방송(quality_monitor/사용자가 실시간으로 뭐 하는지 보게)
         if now_s - self._last_phase_pub > 1.0:

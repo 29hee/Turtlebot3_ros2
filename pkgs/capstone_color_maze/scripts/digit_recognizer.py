@@ -44,6 +44,8 @@ class DigitRecognizer(Node):
         self.declare_parameter('gate_ratio', 0.20)   # ROI 색 점유율 ≥ 이 값일 때만 OCR(근접 판정)
         self.declare_parameter('conf_min', 0.4)      # EasyOCR 확신도(0~1) 이 이상만 채택
         self.declare_parameter('max_rate', 4.0)      # OCR 최대 호출 빈도 [Hz] (EasyOCR 보호)
+        # ★ 거꾸로 장착 카메라 보정. 숫자는 방향에 민감 — 거꾸로면 EasyOCR 가 못 읽는다(실로봇=true).
+        self.declare_parameter('rotate_180', False)
         self.declare_parameter('show', False)        # 디버그 창
 
         self.image_topic = self.get_parameter('image_topic').value
@@ -51,6 +53,7 @@ class DigitRecognizer(Node):
         self.gate_ratio = float(self.get_parameter('gate_ratio').value)
         self.conf_min = float(self.get_parameter('conf_min').value)
         self.max_rate = float(self.get_parameter('max_rate').value)
+        self.rotate_180 = bool(self.get_parameter('rotate_180').value)
         self.show = bool(self.get_parameter('show').value)
 
         self.bridge = CvBridge()
@@ -106,6 +109,8 @@ class DigitRecognizer(Node):
         except Exception as e:
             self.get_logger().warn(f"cv_bridge 변환 실패: {e}")
             return
+        if self.rotate_180:                       # 거꾸로면 숫자를 바로 세워야 OCR 가능
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
 
         h, w = frame.shape[:2]
         rw, rh = int(w * self.roi_ratio), int(h * self.roi_ratio)

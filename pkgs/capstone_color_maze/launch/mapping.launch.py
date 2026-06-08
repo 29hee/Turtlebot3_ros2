@@ -52,6 +52,9 @@ def generate_launch_description():
     explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
     # 탐사기 선택: maze(색-반응 근접캡처+안티스턱, 권장) | scan(구 느린360°스캔) | wall(단순 벽타기)
     explorer = LaunchConfiguration('explorer', default='maze')
+    # 거꾸로 장착 카메라 보정(image_upright 없이도). 실로봇에서 영상이 거꾸로면 flip:=true.
+    #   영상 방향 확인: ros2 run rqt_image_view rqt_image_view /camera/image_raw
+    flip = LaunchConfiguration('flip', default='false')
     # 가제보 GUI 창(gzclient) 표시 여부. 기본 false=안 띄움(물리 gzserver 는 그대로 동작).
     #   로봇 움직임은 RViz(맵+라이다+색마커)로 보면 충분. 굳이 가제보 창 보려면 gui:=true.
     gui = LaunchConfiguration('gui', default='false')
@@ -115,7 +118,8 @@ def generate_launch_description():
     )
     # 단일 디코더 — 영상을 한 번만 풀어 /detected_color, /color_signal 발행(나머지가 구독).
     vision_proc = ExecuteProcess(
-        cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        cmd=['python3', vision_node, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time], '-p', ['rotate_180:=', flip]],
         condition=IfCondition(explore), output='screen',
     )
     # color_mapper 는 '색+숫자 둘 다' 인식된 칸만 저장(무조건) → digit_recognizer 가 필수다.
@@ -131,7 +135,8 @@ def generate_launch_description():
     # 숫자 인식기(EasyOCR) — 색+숫자 둘 다 저장이 필수이므로 매핑에 '상시' 동반.
     #   /detected_digit 발행 → color_mapper 가 격자 digit 투표. (EasyOCR 미설치면 맵이 빈다.)
     digit_proc = ExecuteProcess(
-        cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        cmd=['python3', digit_recognizer, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time], '-p', ['rotate_180:=', flip]],
         condition=IfCondition(explore), output='screen',
     )
 
@@ -144,6 +149,8 @@ def generate_launch_description():
                               description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
         DeclareLaunchArgument('explorer', default_value='maze',
                               description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
+        DeclareLaunchArgument('flip', default_value='false',
+                              description='카메라 거꾸로면 true(숫자 OCR 위해 180° 보정)'),
         DeclareLaunchArgument('sim', default_value='true',
                               description='true=시뮬(gazebo) | false=실로봇(gazebo/spawn/rsp 안 띄움)'),
         DeclareLaunchArgument('gui', default_value='false',
