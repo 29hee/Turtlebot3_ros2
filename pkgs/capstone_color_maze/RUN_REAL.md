@@ -65,27 +65,34 @@ cd /home/user/workspace/co_project/pkgs/capstone_color_maze
 # (터미널 A) SLAM
 ros2 launch slam_toolbox online_async_launch.py use_sim_time:=false
 
-# (터미널 B) 색 누적 매퍼
+# (터미널 B) ★ 단일 디코더 — 영상을 '한 번만' 풀어 /detected_color, /color_signal 발행.
+#   (이거 하나가 색 계산 담당 → mapper·explorer·digit 가 영상 대신 이 신호를 구독 = CPU 절약)
+python3 scripts/vision_node.py --ros-args -p use_sim_time:=false
+
+# (터미널 C) 색 누적 매퍼 — /detected_color + 근접 라이다거리로 격자 투표(근접 max_range 0.8m).
 python3 scripts/color_mapper.py --ros-args -p use_sim_time:=false
 
-# (터미널 C) ★ 자율 탐사 주행 (텔레옵 대신) — 둘레 벽타기 + 주기적 느린 360° 스핀
-python3 scripts/scan_explorer.py --duration 480 --perimeter-frac 1.0 --spin-speed 0.3
-#   --perimeter-frac 1.0 : 내부 웨이포인트(시뮬 방 전용 좌표) 안 씀 → 어떤 방이든 generic.
-#   --spin-speed 0.3     : 회전은 느리게(빠르면 SLAM 맵이 뒤틀림).
-#   --duration 480       : 방 크기에 맞게 조정(작은 방 300, 큰 방 600+).
-#   끝나면 자동 정지. 중간에 멈추려면 Ctrl-C.
+# (터미널 D) 숫자 인식기(EasyOCR) — 패널에 숫자가 있을 때만. 근접일 때만 OCR → /detected_digit.
+python3 scripts/digit_recognizer.py --ros-args -p use_sim_time:=false
 
-# (터미널 D) 보면서 (맵 + 라이다 + 카메라 + 색 마커)
+# (터미널 E) ★ 색-반응 탐사 주행 — 벽타며 색 발견 시 패널 ~0.3m 접근→정지(dwell)해서 근접 기록.
+#   둘레 한 바퀴 → 중앙 진입 → 섬 벽타기. '같은 자리 빙빙' 방지(진행 워치독/방문격자/loop감지) 내장.
+python3 scripts/maze_explorer.py --duration 600 --ros-args -p use_sim_time:=false
+#   끝나면 자동 정지(미방문 소진 또는 시간 상한). 중간에 멈추려면 Ctrl-C.
+
+# (터미널 F) 매핑 품질 라이브 점검 — 색별 벽수/숫자/누락을 주기적으로 출력.
+python3 scripts/quality_monitor.py --ros-args -p expect:="RED:3,GREEN:1,BLUE:2"
+#   ⚠ '미발견'/'숫자미상' 이 보이면 그 구역을 더 돌고 나서 맵 저장.
+
+# (터미널 G) 보면서 (맵 + 라이다 + 카메라 + 색 마커)
 rviz2 -d config/maze.rviz
 
-# (터미널 E) 충분히 돌았으면 점유격자 저장
+# (터미널 H) 충분히 돌았으면 점유격자 저장
 ros2 run nav2_map_server map_saver_cli -f maps/color_room
-
-# 색맵 결과 확인(색당 벽 개수 — RGB 각 3개 나와야 이상적)
-python3 -c "import sys;sys.path.insert(0,'scripts');import yaml;from maze_common import resolve_target_walls;d=yaml.safe_load(open('maps/color_landmarks.yaml'));[print(c,len(resolve_target_walls(d,c)),'개') for c in('RED','GREEN','BLUE')]"
 ```
-> 누락된 색 벽이 있으면 그 구역을 더 보도록 `--duration`을 늘려 재매핑.
-> 벽타기 거리가 안 맞으면(벽에 너무 붙거나 멀면) `scan_explorer.py`의 `target_right`/`front_stop` 조정.
+> quality_monitor 가 모든 색·숫자를 잡았다고 보일 때 저장한다. 누락 있으면 maze_explorer 를
+> 다시 돌리거나 `--duration` 을 늘린다. 벽 추종 거리는 `maze_explorer` 의 `target_right`/`front_stop`,
+> 접근 정지거리는 `standoff`(기본 0.3m), 끼임 탈출은 `stuck_dist`/`stuck_win` 으로 조정.
 
 ---
 
@@ -162,7 +169,7 @@ python3 scripts/color_detector.py --ros-args -p show:=true
 ```bash
 for p in '[s]lam_toolbox' '[a]mcl' '[m]ap_server' '[c]ontroller_server' '[p]lanner_server' \
          '[b]t_navigator' '[l]ifecycle' '[c]olor_confirm' '[m]aze_tour' '[c]olor_mapper' '[s]can_explorer' \
-         '[i]mage_upright'; do
+         '[m]aze_explorer' '[v]ision_node' '[d]igit_recognizer' '[q]uality_monitor' '[i]mage_upright'; do
   pkill -9 -f "$p"; done; ros2 daemon stop; ros2 daemon start
 ```
 
