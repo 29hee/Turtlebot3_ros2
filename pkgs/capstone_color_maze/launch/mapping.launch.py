@@ -43,7 +43,10 @@ def generate_launch_description():
     quality_monitor = os.path.join(pkg, 'scripts', 'quality_monitor.py')
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
 
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
+    #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
+    sim = LaunchConfiguration('sim', default='true')
+    use_sim_time = LaunchConfiguration('use_sim_time', default=sim)   # sim 따라감(실로봇=false)
     x_pose = LaunchConfiguration('x_pose', default='-2.0')
     y_pose = LaunchConfiguration('y_pose', default='-2.0')
     explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
@@ -62,20 +65,25 @@ def generate_launch_description():
     gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzserver.launch.py')),
         launch_arguments={'world': world}.items(),
+        condition=IfCondition(sim),     # 실로봇(sim:=false)이면 안 띄움
     )
     gzclient = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzclient.launch.py')),
-        condition=IfCondition(gui),     # gui:=true 일 때만 가제보 창 표시
+        # 시뮬 + gui:=true 일 때만 가제보 창 표시
+        condition=IfCondition(PythonExpression(
+            ["'", sim, "' == 'true' and '", gui, "' == 'true'"])),
     )
     rsp = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(tb3_gazebo, 'launch', 'robot_state_publisher.launch.py')),
         launch_arguments={'use_sim_time': use_sim_time}.items(),
+        condition=IfCondition(sim),     # 실로봇은 로봇 bringup 이 TF/rsp 제공 → 안 띄움
     )
     spawn = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(tb3_gazebo, 'launch', 'spawn_turtlebot3.launch.py')),
         launch_arguments={'x_pose': x_pose, 'y_pose': y_pose}.items(),
+        condition=IfCondition(sim),     # 실로봇엔 스폰 없음
     )
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -136,6 +144,8 @@ def generate_launch_description():
                               description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
         DeclareLaunchArgument('explorer', default_value='maze',
                               description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
+        DeclareLaunchArgument('sim', default_value='true',
+                              description='true=시뮬(gazebo) | false=실로봇(gazebo/spawn/rsp 안 띄움)'),
         DeclareLaunchArgument('gui', default_value='false',
                               description='가제보 GUI 창 표시(기본 false=안 띄움, RViz 로 관찰)'),
         DeclareLaunchArgument('duration', default_value='600',
