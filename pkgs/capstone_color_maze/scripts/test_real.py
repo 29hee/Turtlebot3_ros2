@@ -34,12 +34,13 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, String
 import tf2_ros
 
-from maze_common import COLOR_RANGES, parse_target
+from maze_common import COLOR_RANGES, parse_target, cluster_cells, filter_clusters
 
 # ── 상태 ──────────────────────────────────────────────────────────────────────
+_ST_SEEK    = 'SEEK_WALL'   # 직진해서 벽 찾기
 _ST_SLAM    = 'SLAM'        # 벽타기 (SLAM 구축용)
 _ST_SPIN    = 'SPIN'        # 360° 스핀 (색 감지)
 _ST_IDLE    = 'IDLE'        # 완료 대기 / 입력 대기
@@ -77,7 +78,7 @@ class TestReal(Node):
         self.declare_parameter('spin_speed',  0.20)     # rad/s
         self.declare_parameter('min_range',   0.15)
         self.declare_parameter('max_range',   3.00)
-        self.declare_parameter('min_ratio',   0.06)
+        self.declare_parameter('min_ratio',   0.04)   # Gazebo 렌더링용 낮춤
         self.declare_parameter('roi_ratio',   0.50)
         self.declare_parameter('grid_res',    0.30)
         self.declare_parameter('standoff',    0.60)     # 패널 앞 정지 거리 [m]
@@ -117,13 +118,14 @@ class TestReal(Node):
         self.target_wx      = None
         self.target_wy      = None
 
-        self.state = _ST_SLAM if self.mode == 'slam' else _ST_SPIN
+        self.state = _ST_SEEK if self.mode == 'slam' else _ST_SPIN
 
         self.bridge      = CvBridge()
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        self.pub_vel = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.pub_vel   = self.create_publisher(Twist,  'cmd_vel',         10)
+        self.pub_color = self.create_publisher(String, '/detected_color',  10)
         self.create_subscription(LaserScan, '/scan',           self._scan_cb,  qos_profile_sensor_data)
         self.create_subscription(Image,     self.image_topic,  self._img_cb,   qos_profile_sensor_data)
         self.create_subscription(Int32,     '/detected_digit', self._digit_cb, 10)
@@ -131,7 +133,7 @@ class TestReal(Node):
 
         if self.mode == 'slam':
             print('\n[test_real] ── SLAM 모드 ────────────────────────────')
-            print('벽타기 주행 시작. slam_toolbox 맵이 닫히면 Ctrl+C 로 종료.\n')
+            print('벽 탐색 중... 벽 발견 후 벽타기 시작. Ctrl+C 로 종료.\n')
         else:
             print('\n[test_real] ── COLOR 모드 ───────────────────────────')
             print(f'360° 스핀 시작 (speed={self.spin_speed} rad/s)')
@@ -225,7 +227,8 @@ class TestReal(Node):
             dc[self._latest_digit] = dc.get(self._latest_digit, 0) + 1
 
     def _save_and_print(self):
-        out = {c: [] for c in COLOR_RANGES}
+        # 1) 원시 셀 수집
+        raw = {c: [] for c in COLOR_RANGES}
         for (gx, gy), cnt in self.votes.items():
             color = max(cnt, key=cnt.get)
             if cnt[color] == 0:
@@ -236,12 +239,20 @@ class TestReal(Node):
             entry = {'x': round(cx,3), 'y': round(cy,3), 'votes': cnt[color]}
             if digit is not None:
                 entry['digit'] = digit
-            out[color].append(entry)
+            raw[color].append(entry)
+
+        # 2) 클러스터링 + 노이즈 필터 (maze_common)
+        out = {c: [] for c in COLOR_RANGES}
+        for color, cells in raw.items():
+            clustered = cluster_cells(cells)
+            filtered  = filter_clusters(clustered, frac=0.1, floor=3)
+            out[color] = filtered
+
         os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
         with open(self.save_path, 'w') as f:
             yaml.safe_dump(out, f, allow_unicode=True, sort_keys=False)
 
-        print('\n── 색 맵 결과 (저장 완료) ──────────────────')
+        print('\n── 색 맵 결과 (클러스터링 후 저장) ─────────')
         any_found = False
         for color, walls in out.items():
             for w in walls:
@@ -293,6 +304,19 @@ class TestReal(Node):
     def _loop(self):
         tf = self._get_tf()
 
+        # ─ 벽 찾기: 직진 → 벽 발견 시 SLAM 전환 ─────────────────────────────
+        if self.state == _ST_SEEK:
+            front = self._front_range()
+            if front is not None and front < 0.8:
+                self.pub_vel.publish(Twist())
+                self.state = _ST_SLAM
+                print('[SEEK→SLAM] 벽 발견, 벽타기 시작')
+            else:
+                cmd = Twist()
+                cmd.linear.x = 0.15
+                self.pub_vel.publish(cmd)
+            return
+
         # ─ SLAM 모드: 벽타기 ─────────────────────────────────────────────────
         if self.state == _ST_SLAM:
             if self.scan is not None:
@@ -317,6 +341,7 @@ class TestReal(Node):
             frame = self._frame
             if frame is not None and tf is not None:
                 color, _ = self._detect_color(frame)
+                self.pub_color.publish(String(data=color))
                 if color != 'NONE':
                     d = self._front_range()
                     if d and self.min_range <= d <= self.max_range:
