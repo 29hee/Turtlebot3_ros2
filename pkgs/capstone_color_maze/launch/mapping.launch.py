@@ -149,8 +149,11 @@ def generate_launch_description():
                               description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
         DeclareLaunchArgument('explorer', default_value='maze',
                               description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
-        DeclareLaunchArgument('flip', default_value='false',
-                              description='카메라 거꾸로면 true(숫자 OCR 위해 180° 보정)'),
+        # 실로봇(sim:=false)은 카메라가 거꾸로 장착(직접 확인됨) → 자동 보정. 시뮬은 정방향.
+        #   재장착 등으로 영상이 똑바르면 flip:=false 로 끌 것.
+        DeclareLaunchArgument('flip', default_value=PythonExpression(
+                                  ["'true' if '", sim, "' == 'false' else 'false'"]),
+                              description='카메라 거꾸로면 true(숫자 OCR용 180° 보정). 실로봇 자동 true'),
         DeclareLaunchArgument('sim', default_value='true',
                               description='true=시뮬(gazebo) | false=실로봇(gazebo/spawn/rsp 안 띄움)'),
         DeclareLaunchArgument('gui', default_value='false',
