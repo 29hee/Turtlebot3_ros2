@@ -19,12 +19,12 @@ source /opt/ros/humble/setup.bash
 source <워크스페이스>/install/setup.bash       # 이 노트북(PC): /home/user/workspace/install/setup.bash · 로봇(Pi): ~/turtlebot3_ws/install/setup.bash
 ```
 
-> **숫자 인식 의존성(색 노드 돌리는 PC만, 1회).** 숫자는 Tesseract OCR 로 읽는다(과거 MNIST CNN 폐기).
+> **숫자 인식 의존성(색 노드 돌리는 PC만, 1회).** 숫자는 `digit_recognizer.py` 가 EasyOCR 로 읽는다
+> (과거 MNIST CNN·Tesseract 폐기, EasyOCR 단일화).
 > ```bash
-> sudo apt install -y tesseract-ocr        # OCR 엔진
-> pip3 install pytesseract                 # 파이썬 바인딩
+> pip3 install easyocr        # 첫 실행 시 인식 모델 자동 다운로드(수십 MB, 1회)
 > ```
-> 미설치여도 색 인식은 정상 동작하고 숫자만 OFF 된다. 숫자 자체가 불필요하면 `-p digit:=false`.
+> 미설치여도 색 인식은 정상 동작하고 숫자만 항상 -1 이 된다.
 
 ## 1) 로봇(라즈베리파이) 측 — SSH
 ```bash
@@ -154,7 +154,8 @@ ros2 run rqt_image_view rqt_image_view /camera/image_raw/compressed
 python3 scripts/color_detector.py --ros-args -p show:=true
 #   원본 + R/G/B 마스크 창. 실조명에서 색이 잡히는지/흰벽이 색으로 새지 않는지 확인
 #   → maze_common.py 의 COLOR_RANGES(특히 S_min) 튜닝 후 재실행.
-#   숫자 OCR 까지 보려면 1.5 의 image_upright 가 떠 있어야 함(아니면 숫자가 거꾸로 → -p rotate_180:=true).
+#   숫자 인식은 별도 노드(EasyOCR):  python3 scripts/digit_recognizer.py --ros-args -p show:=true
+#   (1.5 의 image_upright 가 떠 있어야 숫자가 똑바로 들어감)
 ```
 
 ## 5) 종료 (좀비 정리)
