@@ -72,6 +72,9 @@ class MazeExplorer(Node):
         self.declare_parameter('escape_secs', 3.0)    # 탈출 기동 지속 [s]
         self.declare_parameter('loop_close_dist', 0.5)  # 시작 셀 복귀 판정 거리 [m]
         self.declare_parameter('tf_lost_spin', 1.5)   # TF 끊김 시 제자리 회전 최대 [s]
+        # 색 접근이 이 시간 안에 근접(standoff) 도달 못 하면 포기하고 벽타기 복귀.
+        #   (어안렌즈로 색 중심 정렬이 안 돼 제자리 회전만 하는 무한루프 방지.)
+        self.declare_parameter('approach_timeout', 12.0)
 
         self.total = duration
         self.v_fwd = float(self.get_parameter('v_fwd').value)
@@ -88,6 +91,7 @@ class MazeExplorer(Node):
         self.escape_secs = float(self.get_parameter('escape_secs').value)
         self.loop_close_dist = float(self.get_parameter('loop_close_dist').value)
         self.tf_lost_spin = float(self.get_parameter('tf_lost_spin').value)
+        self.approach_timeout = float(self.get_parameter('approach_timeout').value)
 
         # ── IO ───────────────────────────────────────────────────────
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
@@ -109,6 +113,7 @@ class MazeExplorer(Node):
         self.start = self.now()
         self.phase_start = self.start
         self.captured = []           # [(x,y), ...] 이미 캡처한 패널 map 좌표(중복 방지)
+        self.skipped = []            # [(x,y), ...] 접근 시간초과로 건너뛴 위치(재트리거 방지)
         self.visited = set()         # 방문 격자 셀 인덱스
         self.start_cell = None       # 둘레 loop closure 기준 시작 셀
         self.left_start = False      # 시작 셀을 충분히 벗어났는가(복귀 판정 게이트)
@@ -273,8 +278,10 @@ class MazeExplorer(Node):
         if self.start_cell is None:
             self.start_cell = self.cell(pose[0], pose[1])
 
-        # 2) 갇힘 감지(B) → ESCAPE 인터럽트 (단, CAPTURE 중 정지는 정상이므로 제외)
-        if self.interrupt != 'CAPTURE' and self.watchdog_stuck(pose):
+        # 2) 갇힘 감지(B) → ESCAPE 인터럽트
+        #    CAPTURE(정지 dwell 정상) / APPROACH(색 중심 정렬 위해 제자리 회전 가능)는 제외 —
+        #    APPROACH 는 자체 approach_timeout 으로 무한루프를 막는다(아래).
+        if self.interrupt not in ('CAPTURE', 'APPROACH') and self.watchdog_stuck(pose):
             self.get_logger().warn('진행 워치독: 갇힘 감지 → 탈출 기동')
             self.publish_phase('ESCAPE')
             self.switch(interrupt='ESCAPE')
@@ -295,7 +302,14 @@ class MazeExplorer(Node):
 
         if self.interrupt == 'APPROACH':
             arrived, cmd = self.approach_cmd()
-            # 접근 자체에도 워치독이 걸리면(서보 진동) ESCAPE 로 빠지게 위에서 처리됨.
+            # 시간초과: 어안렌즈로 중심 정렬이 안 돼 standoff 도달 실패 → 포기하고 벽타기 복귀.
+            #   이 자리를 skipped 로 기억해 바로 재트리거되지 않게 한다.
+            if not arrived and self.elapsed(self.phase_start) >= self.approach_timeout:
+                self.skipped.append((pose[0], pose[1]))
+                self.get_logger().warn(
+                    f'접근 시간초과({self.approach_timeout:.0f}s) — 건너뜀 @({pose[0]:.2f},{pose[1]:.2f})')
+                self.switch(interrupt=None)
+                return
             if self.color == 'NONE':
                 self.switch(interrupt=None)   # 색 놓침 → 일반 국면
                 return
@@ -325,8 +339,8 @@ class MazeExplorer(Node):
         self.run_phase(pose)
 
     def _recently_captured(self, pose):
-        """현재 위치가 이미 캡처한 패널 근처면 True(재트리거 방지)."""
-        for (cx, cy) in self.captured:
+        """현재 위치가 이미 캡처했거나 접근 포기(skipped)한 지점 근처면 True(재트리거 방지)."""
+        for (cx, cy) in self.captured + self.skipped:
             if math.hypot(pose[0] - cx, pose[1] - cy) < self.dedup_dist:
                 return True
         return False
