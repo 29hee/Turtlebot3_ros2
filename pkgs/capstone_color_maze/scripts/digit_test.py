@@ -26,6 +26,27 @@ import cv2
 import numpy as np
 from cv_bridge import CvBridge
 
+from maze_common import COLOR_RANGES
+
+DRAW_BGR = {'RED': (0, 0, 255), 'GREEN': (0, 200, 0), 'BLUE': (255, 80, 0), 'NONE': (0, 255, 255)}
+
+
+def detect_color(roi_bgr, min_ratio=0.07):
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    area = max(1, roi_bgr.shape[0] * roi_bgr.shape[1])
+    kernel = np.ones((3, 3), np.uint8)
+    ratios = {}
+    for color, ranges in COLOR_RANGES.items():
+        mask = None
+        for lo, hi in ranges:
+            m = cv2.inRange(hsv, np.array(lo), np.array(hi))
+            mask = m if mask is None else cv2.bitwise_or(mask, m)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        ratios[color] = int(cv2.countNonZero(mask)) / area
+    best = max(ratios, key=ratios.get)
+    detected = best if ratios[best] >= min_ratio else 'NONE'
+    return detected, ratios
+
 # ── 백엔드 로드 (EasyOCR) ────────────────────────────────────────────────────
 try:
     import easyocr
@@ -88,33 +109,29 @@ class DigitTestNode(Node):
         x2, y2 = x1 + rw, y1 + rh
         roi = frame[y1:y2, x1:x2]
 
+        color_name, ratios = detect_color(roi)
         results = recognize(roi)
 
         # ── 로그: 결과가 바뀔 때만 ────────────────────────────────────
         now = time.time()
         if results != self._last_result or now - self._last_log_time > 3.0:
-            if results:
-                for txt, conf in results:
-                    self.get_logger().info(f'인식: "{txt}"  conf={conf:.2f}')
-            else:
-                self.get_logger().info('인식: 없음')
+            ratio_str = ' '.join(f'{c[0]}={ratios[c]:.2f}' for c in COLOR_RANGES)
+            digit_str = '  '.join(f'"{t}" {c:.2f}' for t, c in results) if results else '없음'
+            self.get_logger().info(f'색={color_name} ({ratio_str})  숫자={digit_str}')
             self._last_result = results
             self._last_log_time = now
 
         # ── 시각화 ────────────────────────────────────────────────────
         disp = frame.copy()
-        cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        box_color = DRAW_BGR[color_name]
+        cv2.rectangle(disp, (x1, y1), (x2, y2), box_color, 2)
 
-        if results:
-            label = '  '.join(f'"{t}" {c:.0%}' for t, c in results)
-            color = (0, 255, 0)
-        else:
-            label = 'no digit'
-            color = (120, 120, 120)
+        digit_str = '  '.join(f'"{t}" {c:.0%}' for t, c in results) if results else 'no digit'
+        label = f'{color_name}  {digit_str}'
 
         cv2.putText(disp, f'[{_BACKEND}] {label}',
                     (x1, max(20, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, box_color, 2)
 
         # ROI 확대본을 우상단에 표시
         thumb_h = min(160, h // 3)

@@ -1,3 +1,27 @@
-RED: []
-GREEN: []
-BLUE: []
+RED:
+- x: 2.85
+  y: -3.15
+  votes: 6
+- x: 2.55
+  y: -1.35
+  votes: 12
+GREEN:
+- x: 1.95
+  y: 0.15
+  votes: 11
+- x: 2.25
+  y: 0.15
+  votes: 14
+- x: 1.95
+  y: 0.45
+  votes: 14
+BLUE:
+- x: 2.25
+  y: -0.45
+  votes: 9
+- x: 2.25
+  y: -0.75
+  votes: 95
+- x: 0.75
+  y: -0.15
+  votes: 15

@@ -237,7 +237,7 @@ class ColorMapper(Node):
         clear.action = Marker.DELETEALL
         arr.markers.append(clear)
         mid = 0
-        for color, cx, cy, _ in self.finalized():
+        for color, cx, cy, _votes, _digit in self.finalized():
             r, g, b = MARKER_RGB[color]
             m = Marker()
             m.header.frame_id = self.map_frame
