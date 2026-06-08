@@ -51,7 +51,8 @@ def wrap(a):
 class MazeExplorer(Node):
     def __init__(self, duration):
         super().__init__('maze_explorer')
-        self.declare_parameter('use_sim_time', False)
+        # use_sim_time 은 --ros-args -p 로 넘기면 rclpy 가 자동 선언하므로 여기서 선언하지 않는다
+        # (중복 선언하면 ParameterAlreadyDeclaredException 으로 노드가 죽는다).
 
         # ── 주행/벽타기 파라미터 ─────────────────────────────────────
         self.declare_parameter('v_fwd', 0.13)        # 전진 속도 [m/s]
