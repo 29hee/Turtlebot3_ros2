@@ -33,6 +33,22 @@ COLOR_RANGES = {
 
 VALID_COLORS = ('RED', 'GREEN', 'BLUE')
 
+# /color_signal(Float32MultiArray) 의 color_id 단일 출처. index = id (0=NONE).
+# vision_node 가 발행, maze_explorer 등이 해석할 때 같은 표를 쓰도록 여기 둔다.
+COLOR_IDS = ('NONE',) + VALID_COLORS   # ('NONE','RED','GREEN','BLUE')
+
+
+def color_to_id(c):
+    """'RED' → 1 등. 유효하지 않으면 0(NONE)."""
+    return COLOR_IDS.index(c) if c in COLOR_IDS else 0
+
+
+def id_to_color(i):
+    """1 → 'RED' 등. 범위 밖이면 'NONE'."""
+    i = int(i)
+    return COLOR_IDS[i] if 0 <= i < len(COLOR_IDS) else 'NONE'
+
+
 # 사양 목표: "target-color HSV mask must cover at least 60% of the camera frame".
 # 현재값 = 0.30 (임시). burger_cam 은 fov 약 182° 초광각이라 작품을 정면에서 봐도
 # 프레임 점유율이 낮아 60%에 도달하지 못한다 → 우선 30%로 통일해 파이프라인을 굴린다.

@@ -29,15 +29,12 @@ import sys
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import LaserScan, Image
+from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
-import numpy as np
-import cv2
-from cv_bridge import CvBridge
+from std_msgs.msg import String, Float32MultiArray
 import tf2_ros
 
-from maze_common import COLOR_RANGES   # HSV 색 범위 단일 출처
+from maze_common import id_to_color   # color_id → 'RED' 등 (vision_node 와 동일 표)
 
 
 def yaw_from_quat(q):
@@ -93,10 +90,10 @@ class MazeExplorer(Node):
         # ── IO ───────────────────────────────────────────────────────
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.create_subscription(LaserScan, 'scan', self.on_scan, qos_profile_sensor_data)
-        self.create_subscription(Image, '/camera/image_raw', self.on_image, qos_profile_sensor_data)
+        # 영상은 직접 안 푼다 — vision_node 가 푼 색 신호만 구독(단일 디코딩).
+        self.create_subscription(Float32MultiArray, '/color_signal', self.on_signal, 10)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        self.bridge = CvBridge()
         # 진척 상황 방송(quality_monitor/로그용): "PERIMETER", "CAPTURE RED@(x,y)" 등
         self.pub_phase = self.create_publisher(String, '/explorer_phase', 10)
 
@@ -131,36 +128,16 @@ class MazeExplorer(Node):
     def on_scan(self, msg):
         self.scan = msg
 
-    def on_image(self, msg):
-        """우세색 + blob 중심 x(정규화) + 점유율 계산 — 비주얼 서보/발견 신호."""
-        try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        except Exception:
+    def on_signal(self, msg):
+        """vision_node 의 [color_id, cx_norm, coverage] → 비주얼 서보/발견 신호.
+        seen_ratio 미만 점유율은 NONE 으로 취급(탐사기측 발견 임계)."""
+        d = msg.data
+        if len(d) < 3:
             return
-        h, w = frame.shape[:2]
-        rw, rh = int(w * 0.7), int(h * 0.7)
-        x0, y0 = (w - rw) // 2, (h - rh) // 2
-        roi = frame[y0:y0 + rh, x0:x0 + rw]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        area = max(1, rw * rh)
-        kernel = np.ones((3, 3), np.uint8)
-        best, best_cov, best_mask = 'NONE', 0.0, None
-        for color, ranges in COLOR_RANGES.items():
-            mask = None
-            for lo, hi in ranges:
-                m = cv2.inRange(hsv, np.array(lo), np.array(hi))
-                mask = m if mask is None else cv2.bitwise_or(mask, m)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            cov = cv2.countNonZero(mask) / area
-            if cov > best_cov:
-                best, best_cov, best_mask = color, cov, mask
-        self.color, self.color_cov = (best, best_cov) if best_cov >= self.seen_ratio else ('NONE', best_cov)
-        # blob 중심 x → 화면중앙 대비 정규화(-1 왼쪽 ~ +1 오른쪽)
-        if self.color != 'NONE' and best_mask is not None:
-            mmt = cv2.moments(best_mask)
-            if mmt['m00'] > 0:
-                cx = mmt['m10'] / mmt['m00']
-                self.color_cx = (cx - rw / 2.0) / (rw / 2.0)
+        cov = float(d[2])
+        self.color = id_to_color(d[0]) if cov >= self.seen_ratio else 'NONE'
+        self.color_cx = float(d[1])
+        self.color_cov = cov
 
     def sector_min(self, deg_lo, deg_hi):
         s = self.scan

@@ -39,6 +39,8 @@ def generate_launch_description():
     scan_explorer = os.path.join(pkg, 'scripts', 'scan_explorer.py')
     maze_explorer = os.path.join(pkg, 'scripts', 'maze_explorer.py')
     color_mapper = os.path.join(pkg, 'scripts', 'color_mapper.py')
+    vision_node = os.path.join(pkg, 'scripts', 'vision_node.py')
+    quality_monitor = os.path.join(pkg, 'scripts', 'quality_monitor.py')
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
@@ -101,8 +103,18 @@ def generate_launch_description():
         cmd=['python3', wall_follower, '--duration', duration],
         condition=IfCondition(wall_cond), output='screen',
     )
+    # 단일 디코더 — 영상을 한 번만 풀어 /detected_color, /color_signal 발행(나머지가 구독).
+    vision_proc = ExecuteProcess(
+        cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(explore), output='screen',
+    )
     mapper_proc = ExecuteProcess(
         cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(explore), output='screen',
+    )
+    # 매핑 중 라이브 품질 체크리스트(색별 벽수/digit/누락 경고).
+    quality_proc = ExecuteProcess(
+        cmd=['python3', quality_monitor],
         condition=IfCondition(explore), output='screen',
     )
     # 숫자 인식기(EasyOCR) — digit:=true 일 때만. /detected_digit 발행 → color_mapper 가 격자 digit 투표.
@@ -125,5 +137,5 @@ def generate_launch_description():
         DeclareLaunchArgument('duration', default_value='600',
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         gzserver, gzclient, rsp, spawn, slam,
-        maze_proc, scan_proc, wf_proc, mapper_proc, digit_proc,
+        vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
     ])

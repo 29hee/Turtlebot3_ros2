@@ -23,12 +23,9 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Float32MultiArray
 import cv2
-import numpy as np
 from cv_bridge import CvBridge
-
-from maze_common import COLOR_RANGES   # HSV 색 범위 단일 출처(게이팅용)
 
 # EasyOCR 없으면 항상 -1 발행하도록 guard (색 파이프라인은 영향 없음)
 try:
@@ -70,23 +67,16 @@ class DigitRecognizer(Node):
         else:
             self.get_logger().error("easyocr 미설치 → 숫자 항상 -1. 'pip3 install easyocr' 필요")
 
+        # 근접 게이트는 vision_node 의 coverage 를 그대로 쓴다(여기서 HSV 다시 안 돈다 → 단일 디코딩).
+        self._cov = 0.0
+        self.create_subscription(Float32MultiArray, '/color_signal', self._sig_cb, 10)
         self.create_subscription(Image, self.image_topic, self.cb, qos_profile_sensor_data)
         self.pub = self.create_publisher(Int32, '/detected_digit', 10)
 
     # ──────────────────────────────────────────────────────────────
-    def max_coverage(self, hsv):
-        """ROI HSV 에서 R/G/B 중 최대 색 점유율(0~1). 근접/정면 게이팅 신호."""
-        area = max(1, hsv.shape[0] * hsv.shape[1])
-        kernel = np.ones((3, 3), np.uint8)
-        best = 0.0
-        for ranges in COLOR_RANGES.values():
-            mask = None
-            for lo, hi in ranges:
-                m = cv2.inRange(hsv, np.array(lo), np.array(hi))
-                mask = m if mask is None else cv2.bitwise_or(mask, m)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            best = max(best, cv2.countNonZero(mask) / area)
-        return best
+    def _sig_cb(self, msg):
+        if len(msg.data) >= 3:
+            self._cov = float(msg.data[2])   # [color_id, cx_norm, coverage]
 
     def read_digit(self, roi_bgr):
         """EasyOCR 로 ROI 의 단일 숫자 인식. (숫자, conf). 없으면 (-1, best_conf)."""
@@ -116,10 +106,9 @@ class DigitRecognizer(Node):
         rw, rh = int(w * self.roi_ratio), int(h * self.roi_ratio)
         x1, y1 = (w - rw) // 2, (h - rh) // 2
         roi = frame[y1:y1 + rh, x1:x1 + rw]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
         digit, conf = -1, 0.0
-        gated = self.max_coverage(hsv) >= self.gate_ratio   # 근접·정면일 때만 True
+        gated = self._cov >= self.gate_ratio   # vision_node coverage 기반 근접 게이트
         now = time.time()
         if (self._reader is not None and gated
                 and now - self._last_ocr >= 1.0 / max(0.1, self.max_rate)):
