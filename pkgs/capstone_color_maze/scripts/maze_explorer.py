@@ -24,7 +24,10 @@ maze_explorer.py — 색-반응형 매핑 탐사 주행 (scan_explorer 대체).
 실행:  python3 maze_explorer.py --ros-args -p use_sim_time:=true
 """
 import math
+import os
 import sys
+
+import yaml
 
 import rclpy
 from rclpy.node import Node
@@ -34,7 +37,9 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float32MultiArray
 import tf2_ros
 
-from maze_common import id_to_color   # color_id → 'RED' 등 (vision_node 와 동일 표)
+from maze_common import id_to_color, resolve_target_walls, VALID_COLORS
+# id_to_color: color_id → 'RED' 등 (vision_node 와 동일 표)
+# resolve_target_walls/VALID_COLORS: 품질 게이트에서 색+숫자 '벽' 수 집계용
 
 
 def yaw_from_quat(q):
@@ -80,6 +85,12 @@ class MazeExplorer(Node):
         #   사망, 라이다 멈춤) '탐사 중'으로 착각하며 헛돌지 않게 즉시 정지+경고한다.
         self.declare_parameter('sensor_timeout', 3.0)    # /scan 이 이 시간 끊기면 정지 [s]
         self.declare_parameter('pose_lost_limit', 12.0)  # TF 위치가 이 시간 끊기면 정지+경고 [s]
+        # ── 매핑 종료 품질 게이트 ────────────────────────────────────
+        #   자연 종료(둘레/섬 한 바퀴) 시 color_landmarks.yaml 의 '색+숫자 벽' 수가
+        #   min_quality_walls 미만이면 종료하지 않고 재탐사(놓친 숫자 재수집). 0=비활성.
+        #   시간 상한(total)은 그대로 안전망이라 무한루프 없음.
+        self.declare_parameter('min_quality_walls', 1)   # 종료 전 필요한 색+숫자 벽 최소수(0=끔)
+        self.declare_parameter('max_resweeps', 2)        # 품질 미달 시 재탐사 최대 횟수
 
         self.total = duration
         self.v_fwd = float(self.get_parameter('v_fwd').value)
@@ -99,6 +110,12 @@ class MazeExplorer(Node):
         self.approach_timeout = float(self.get_parameter('approach_timeout').value)
         self.sensor_timeout = float(self.get_parameter('sensor_timeout').value)
         self.pose_lost_limit = float(self.get_parameter('pose_lost_limit').value)
+        self.min_quality_walls = int(self.get_parameter('min_quality_walls').value)
+        self.max_resweeps = int(self.get_parameter('max_resweeps').value)
+        self._resweeps = 0
+        # color_mapper 와 동일 경로의 color_landmarks.yaml (품질 게이트에서 읽음)
+        _here = os.path.dirname(os.path.realpath(__file__))
+        self._landmarks_path = os.path.join(os.path.dirname(_here), 'maps', 'color_landmarks.yaml')
 
         # ── IO ───────────────────────────────────────────────────────
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
@@ -436,7 +453,7 @@ class MazeExplorer(Node):
             c.linear.x = self.v_fwd if abs(herr) < 0.5 else 0.05
             # 내부 목표(둘레 무게중심) 근처인데 섬이 없으면 섬 없음 → 종료.
             if math.hypot(x - tx, y - ty) < 0.4:
-                self.stop_and_quit('내부 중심 도달했으나 섬 없음 → 탐사 종료')
+                self.complete_or_continue('내부 중심 도달했으나 섬 없음 → 탐사 종료')
                 return
             self.pub.publish(c)
 
@@ -446,9 +463,53 @@ class MazeExplorer(Node):
             if not self.left_start and d_start > 1.0:
                 self.left_start = True
             if self.left_start and d_start < self.loop_close_dist:
-                self.stop_and_quit('=== 섬 한 바퀴 완료 → 탐사 종료 ===')
+                self.complete_or_continue('=== 섬 한 바퀴 완료 → 탐사 종료 ===')
                 return
             self.pub.publish(self.wall_follow_cmd())
+
+    # ── 품질 게이트 ──────────────────────────────────────────────────
+    def _count_quality_walls(self):
+        """color_landmarks.yaml 에서 '색+숫자' 가 확정된 '벽'(클러스터) 수를 센다.
+        파일 없음/깨짐은 0(노드는 안 죽음)."""
+        try:
+            with open(self._landmarks_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            return 0
+        total = 0
+        for c in VALID_COLORS:
+            for w in resolve_target_walls(data, c):
+                if w.get('digit') is not None:
+                    total += 1
+        return total
+
+    def complete_or_continue(self, reason):
+        """자연 종료 시점의 품질 게이트. 기준 충족이면 종료, 미달이면 재탐사(상한까지),
+        상한 도달이면 경고와 함께 그대로 종료. (시간 상한은 별도 안전망.)"""
+        if self.min_quality_walls <= 0:
+            self.stop_and_quit(reason)            # 게이트 비활성 → 기존 동작
+            return
+        n = self._count_quality_walls()
+        if n >= self.min_quality_walls:
+            self.stop_and_quit(reason + f' (품질 OK: 색+숫자 벽 {n}개)')
+            return
+        if self._resweeps < self.max_resweeps:
+            self._resweeps += 1
+            self.get_logger().warn(
+                f'품질 미달(색+숫자 벽 {n}/{self.min_quality_walls}) → 재탐사 '
+                f'{self._resweeps}/{self.max_resweeps}: 놓친 숫자 재수집을 위해 다시 돈다')
+            self.publish_phase(f'QUALITY_LOW {n}/{self.min_quality_walls}')
+            # 캡처/스킵 기록을 비워 이미 본 패널도 재접근해 digit 을 다시 읽게 한다.
+            self.captured.clear()
+            self.skipped.clear()
+            self.phase = 'PERIMETER'
+            self.interrupt = None
+            self.left_start = False
+            self.start_cell = None
+            self.phase_start = self.now()
+            return
+        self.stop_and_quit(
+            reason + f' (품질 미달 {n}/{self.min_quality_walls}, 재탐사 상한 도달 — 그대로 종료)')
 
     def stop_and_quit(self, msg):
         self.pub.publish(Twist())

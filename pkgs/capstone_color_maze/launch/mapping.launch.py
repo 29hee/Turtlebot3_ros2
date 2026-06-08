@@ -68,6 +68,8 @@ def generate_launch_description():
     # 탐사 종료 시 점유격자맵을 저장할 경로(확장자 없이). 런타임 기본맵과 '같은 이름'으로
     #   덮어써, 방금 만든 점유맵 + color_landmarks.yaml 이 같은 SLAM 좌표 한 쌍이 되게 한다.
     map_save = LaunchConfiguration('map_save', default=os.path.join(pkg, 'maps', 'color_room'))
+    # 매핑 종료 품질 게이트: 자연 종료 시 색+숫자 벽이 이 수 미만이면 재탐사(0=끔).
+    min_walls = LaunchConfiguration('min_walls', default='1')
 
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
@@ -113,7 +115,8 @@ def generate_launch_description():
         ["'", explore, "' == 'true' and '", explorer, "' == 'wall'"])
     maze_proc = ExecuteProcess(
         cmd=['python3', maze_explorer, '--duration', duration,
-             '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+             '--ros-args', '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['min_quality_walls:=', min_walls]],
         condition=IfCondition(maze_cond), output='screen',
     )
     scan_proc = ExecuteProcess(
@@ -204,6 +207,8 @@ def generate_launch_description():
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         DeclareLaunchArgument('map_save', default_value=os.path.join(pkg, 'maps', 'color_room'),
                               description='탐사 종료 시 점유격자맵 저장 경로(확장자 없이)'),
+        DeclareLaunchArgument('min_walls', default_value='1',
+                              description='매핑 종료 품질 게이트: 색+숫자 벽 최소수(미달이면 재탐사, 0=끔)'),
         guard_proc, guard_handler,
         gzserver, gzclient, rsp, spawn, slam,
         upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
