@@ -30,6 +30,7 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, CompressedImage
+from rcl_interfaces.msg import ParameterDescriptor
 import cv2
 import numpy as np
 from cv_bridge import CvBridge
@@ -41,7 +42,10 @@ class ImageUpright(Node):
 
         self.declare_parameter('in_topic', '/camera/image_raw_rot')   # 원본(거꾸로)
         self.declare_parameter('out_topic', '/camera/image_raw')      # 보정본(표준 토픽)
-        self.declare_parameter('flip', '180')                         # 180 | v | h
+        # dynamic_typing: 런치에서 -p flip:=180 이 INTEGER 로 와도 허용(아래 str() 로 정규화).
+        #   (고정 STRING 선언이면 INTEGER 오버라이드와 타입 충돌로 노드가 죽는다.)
+        self.declare_parameter('flip', '180',                         # 180 | v | h
+                               ParameterDescriptor(dynamic_typing=True))
         # True: 무선 절약 위해 in_topic+'/compressed'(JPEG) 구독. False: raw Image 구독.
         self.declare_parameter('compressed_in', True)
 

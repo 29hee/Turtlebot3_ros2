@@ -63,10 +63,18 @@ class DigitRecognizer(Node):
 
         if _OCR_OK:
             # Reader 생성은 무거우니 1회만. gpu=False(로봇/노트북 CPU 기준).
-            self._reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-            self.get_logger().info(
-                f"digit_recognizer 시작 — EasyOCR 준비됨 "
-                f"(gate={self.gate_ratio}, max_rate={self.max_rate}Hz)")
+            # ★ 모델 로드/다운로드(첫 실행 시 인터넷 필요) 실패가 노드를 죽이지 않게 가드 —
+            #   실패하면 _reader=None 로 두고 숫자 항상 -1 발행(색 파이프라인은 계속 동작).
+            try:
+                self._reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+                self.get_logger().info(
+                    f"digit_recognizer 시작 — EasyOCR 준비됨 "
+                    f"(gate={self.gate_ratio}, max_rate={self.max_rate}Hz)")
+            except Exception as e:
+                self._reader = None
+                self.get_logger().error(
+                    f"EasyOCR Reader 초기화 실패 → 숫자 항상 -1 (노드는 계속 동작). "
+                    f"첫 실행이면 모델 다운로드용 인터넷 필요할 수 있음: {e}")
         else:
             self.get_logger().error("easyocr 미설치 → 숫자 항상 -1. 'pip3 install easyocr' 필요")
 
