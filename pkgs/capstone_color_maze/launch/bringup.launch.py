@@ -38,8 +38,8 @@ def generate_launch_description():
     color_confirm = os.path.join(pkg, 'scripts', 'color_confirm.py')
     maze_tour = os.path.join(pkg, 'scripts', 'maze_tour.py')
 
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
-    start_gazebo = LaunchConfiguration('start_gazebo', default='true')
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    start_gazebo = LaunchConfiguration('start_gazebo', default='false')
     # 실로봇: 시작 시 제자리 회전으로 자기위치부터 찾기. 시뮬은 set_initial_pose 라 false.
     relocalize = LaunchConfiguration('relocalize', default='false')
     map_yaml = LaunchConfiguration('map', default=default_map)
@@ -80,9 +80,9 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('use_sim_time', default_value='true'),
-        DeclareLaunchArgument('start_gazebo', default_value='true',
-                              description='시뮬레이션이면 true, 실로봇이면 false'),
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('start_gazebo', default_value='false',
+                              description='시뮬레이션이면 true, 실로봇이면 false(기본)'),
         DeclareLaunchArgument('relocalize', default_value='false',
                               description='실로봇이면 true: 시작 시 제자리 회전으로 자기위치 추정'),
         DeclareLaunchArgument('map', default_value=default_map),

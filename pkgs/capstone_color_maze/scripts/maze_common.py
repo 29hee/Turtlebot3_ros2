@@ -25,10 +25,10 @@ import math
 # 조명/카메라가 바뀌면 color_detector.py(-p show:=true)로 마스크 보며 S_min 부터 재보정.
 COLOR_RANGES = {
     # 빨강은 Hue 가 0 부근에서 끊겨 양끝 두 구간을 OR.
-    'RED':   [((0,   110, 70),  (10,  255, 255)),
-             ((170, 110, 70),  (179, 255, 255))],
-    'GREEN': [((40,  90,  60),  (80,  255, 255))],
-    'BLUE':  [((100, 110, 60),  (128, 255, 255))],
+    'RED':   [((0,   150, 80),  (10,  255, 255)),
+             ((170, 150, 80),  (179, 255, 255))],
+    'GREEN': [((40,  130, 80),  (80,  255, 255))],
+    'BLUE':  [((100, 150, 80),  (128, 255, 255))],
 }
 
 VALID_COLORS = ('RED', 'GREEN', 'BLUE')
@@ -48,6 +48,26 @@ def normalize_color(name):
         return None
     c = str(name).strip().upper()
     return c if c in VALID_COLORS else None
+
+
+def parse_target(s):
+    """'RED_1' / 'RED 1' / 'RED' → (color, digit).
+    digit 없으면 None. 색이 유효하지 않으면 (None, None).
+    예: 'RED_1' → ('RED', 1),  'GREEN' → ('GREEN', None)
+    """
+    if not s:
+        return None, None
+    parts = str(s).strip().upper().replace(' ', '_').split('_', 1)
+    color = normalize_color(parts[0])
+    if color is None:
+        return None, None
+    digit = None
+    if len(parts) == 2:
+        try:
+            digit = int(parts[1])
+        except ValueError:
+            pass
+    return color, digit
 
 
 def is_confirmed(coverage, threshold=CONFIRM_THRESHOLD):
@@ -149,7 +169,12 @@ def cluster_cells(cells, merge_dist=MERGE_DIST):
         tv = sum(c['votes'] for c in g)
         cx = sum(c['x'] * c['votes'] for c in g) / tv
         cy = sum(c['y'] * c['votes'] for c in g) / tv
-        out.append({'x': cx, 'y': cy, 'votes': tv})
+        # digit: 클러스터 내 최다 득표 셀의 digit 채택
+        cells_with_digit = [c for c in g if c.get('digit') is not None]
+        entry = {'x': cx, 'y': cy, 'votes': tv}
+        if cells_with_digit:
+            entry['digit'] = max(cells_with_digit, key=lambda c: c['votes'])['digit']
+        out.append(entry)
     return out
 
 
