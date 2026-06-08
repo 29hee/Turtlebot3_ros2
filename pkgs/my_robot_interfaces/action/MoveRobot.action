@@ -1,8 +1,0 @@
-# Goal: 이동할 목표 거리
-float32 target_distance
----
-# Result: 목표 도달 성공 여부
-bool reached
----
-# Feedback: 현재까지 이동한 거리
-float32 current_distance
