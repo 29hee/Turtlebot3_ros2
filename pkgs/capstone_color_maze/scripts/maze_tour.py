@@ -306,6 +306,31 @@ class MazeTour(Node):
                 return
             self.get_logger().info('=== 다음 색 대기 (/target_color) ===')
 
+    # ── digit 발견 패스 ────────────────────────────────────────────
+    def _discover_digits(self, walls):
+        """각 벽을 빠르게 방문해 보이는 digit 을 기록. {wall_id: digit} 반환.
+        digit 미감지 벽은 결과에서 제외."""
+        from collections import Counter
+        kor = KOR.get(self.target, self.target)
+        digit_map = {}
+        for w in walls:
+            ax, ay, yaw = approach_pose(w['x'], w['y'], self.standoff)
+            if not self.nav_to(ax, ay, yaw, f'탐색 {kor}{w["id"]}'):
+                continue
+            seen = []
+            end = time.time() + 2.5
+            while time.time() < end and rclpy.ok():
+                rclpy.spin_once(self, timeout_sec=0.1)
+                if self._detected_digit >= 0:
+                    seen.append(self._detected_digit)
+            if seen:
+                digit = Counter(seen).most_common(1)[0][0]
+                digit_map[w['id']] = digit
+                self.get_logger().info(f'  {kor} {w["id"]}번 → 숫자 {digit} 감지')
+            else:
+                self.get_logger().warn(f'  {kor} {w["id"]}번 숫자 감지 실패 — 건너뜀')
+        return digit_map
+
     # ── 한 색 순회 ─────────────────────────────────────────────────
     def run_tour(self):
         self.get_logger().info(f'=== 색벽 순회 시작: target = {self.target} ===')
@@ -326,14 +351,30 @@ class MazeTour(Node):
             return False
 
         kor = KOR.get(self.target, self.target)
-        order = order_walls(walls, rxy)   # 방문 순서(최근접). id 는 벽 고유 신원(별개).
-        ids = ', '.join(f'{kor} {w["id"]}번' for w in order)
-        self.get_logger().info(
-            f'{kor} 벽 {len(order)}개 순회 예정 (방문순서: {ids}, '
-            f'시작 {rxy[0]:.2f},{rxy[1]:.2f})')
+
+        if self.target_digit is None:
+            # ── 전체 순회 모드: 발견 패스 → digit 오름차순 정렬 ──────
+            self.get_logger().info(
+                f'{kor} 전체 순회 — 먼저 각 벽의 숫자를 탐색합니다.')
+            nn_order = order_walls(walls, rxy)
+            digit_map = self._discover_digits(nn_order)
+            if not digit_map:
+                self.get_logger().error('숫자 감지 실패 — 순회 중단.')
+                return False
+            order = sorted(
+                [w for w in walls if w['id'] in digit_map],
+                key=lambda w: digit_map[w['id']])
+            ids = ' → '.join(
+                f'{kor}{digit_map[w["id"]]}({w["id"]}번)' for w in order)
+            self.get_logger().info(f'digit 순 방문 순서: {ids}')
+        else:
+            # ── 특정 숫자 모드: 해당 digit 벽만 찾아감 ───────────────
+            order = order_walls(walls, rxy)
+            self.get_logger().info(
+                f'{kor} {self.target_digit}번 탐색 — {len(order)}개 벽 순회')
 
         confirmed = []          # [(id, x, y, ax, ay, yaw), ...] 확인된 벽
-        failed = []             # [(id, 사유), ...] 접근/확인 실패한 벽(존재하면 미션 실패)
+        failed = []             # [(id, 사유), ...] 접근/확인 실패한 벽
         for w in order:
             wid = w['id']
             ax, ay, yaw = approach_pose(w['x'], w['y'], self.standoff)
@@ -346,19 +387,31 @@ class MazeTour(Node):
             if self.await_confirmation():
                 self.get_logger().info(f'{kor} {wid}번 확인({CONFIRM_THRESHOLD:.0%} 이상)')
                 confirmed.append((wid, w['x'], w['y'], ax, ay, yaw))
+                # 특정 digit 모드: 일치하는 벽 하나 찾으면 바로 완료
+                if self.target_digit is not None:
+                    break
             else:
-                self.get_logger().error(f'{kor} {wid}번 {CONFIRM_THRESHOLD:.0%} 확인 실패')
-                failed.append((wid, '확인'))
+                if self.target_digit is not None:
+                    # 다른 숫자 벽 → 스킵(실패 아님)
+                    self.get_logger().info(f'{kor} {wid}번 숫자 불일치 — 다음 벽으로')
+                else:
+                    self.get_logger().error(f'{kor} {wid}번 확인 실패')
+                    failed.append((wid, '확인'))
 
         # 엄격 완료: target 색 '모든' 벽이 확인돼야 미션 완료(사양 'after confirming all').
         # 확인/접근 실패 벽이 하나라도 있으면 정상 상태가 아님 → 에스컬레이션, /maze_done 미발행.
         # (그런 벽이 생긴다는 건 보통 매핑/SLAM·랜드마크 품질 문제이므로 매핑을 다시 제대로 할 것.)
-        if failed:
+        # 특정 digit 모드: confirmed 가 하나도 없으면 미발견
+        if self.target_digit is not None:
+            if not confirmed:
+                self.get_logger().error(
+                    f'=== {kor} {self.target_digit}번 벽을 찾지 못했습니다 — /maze_done 미발행 ===')
+                return False
+        elif failed:
             detail = ', '.join(f'{kor} {fid}번({why})' for fid, why in failed)
             self.get_logger().error(
                 f'=== 미션 실패: {len(confirmed)}/{len(order)}개만 확인, '
-                f'미확인 [{detail}] — /maze_done 미발행. '
-                f'매핑/랜드마크를 점검해 모든 {kor} 벽이 잡히도록 재매핑 권장. ===')
+                f'미확인 [{detail}] — /maze_done 미발행. ===')
             return False
 
         # 전부 확인됨 → 마지막(=방문 순서상 마지막) 확인 벽에서 정지.
