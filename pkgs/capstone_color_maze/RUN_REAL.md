@@ -70,6 +70,8 @@ ros2 launch slam_toolbox online_async_launch.py use_sim_time:=false
 python3 scripts/vision_node.py --ros-args -p use_sim_time:=false
 
 # (터미널 C) 색 누적 매퍼 — /detected_color + 근접 라이다거리로 격자 투표(근접 max_range 0.8m).
+#   기본 require_digit:=true → '색+숫자 둘 다' 인식된 칸만 저장(인덱스순 방문용).
+#   숫자를 안 쓰면(터미널 D 생략) 반드시 -p require_digit:=false (안 그러면 맵이 빈다).
 python3 scripts/color_mapper.py --ros-args -p use_sim_time:=false
 
 # (터미널 D) 숫자 인식기(EasyOCR) — 패널에 숫자가 있을 때만. 근접일 때만 OCR → /detected_digit.

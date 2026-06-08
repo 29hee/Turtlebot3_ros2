@@ -80,6 +80,10 @@ class ColorMapper(Node):
         self.declare_parameter('max_range', 0.8)
         self.declare_parameter('grid_res', 0.30)       # 격자 한 변 [m]
         self.declare_parameter('min_votes', 5)         # 이 득표 이상인 칸만 채택
+        # True: 색+숫자 '둘 다' 인식된 칸만 저장(인덱스순 방문에 필요). 숫자 못 읽은 칸은 보류
+        #   → quality_monitor 에서 'expect 대비 부족'으로 떠 그 패널 재접근 신호가 된다.
+        #   숫자가 없는 환경이거나 digit_recognizer 를 안 띄우면 false 로(안 그러면 맵이 빈다).
+        self.declare_parameter('require_digit', True)
         self.declare_parameter('save_path', default_landmarks_path())
         self.declare_parameter('save_period', 3.0)
 
@@ -89,8 +93,10 @@ class ColorMapper(Node):
         self.max_range = float(self.get_parameter('max_range').value)
         self.grid_res = float(self.get_parameter('grid_res').value)
         self.min_votes = int(self.get_parameter('min_votes').value)
+        self.require_digit = bool(self.get_parameter('require_digit').value)
         self.save_path = self.get_parameter('save_path').value
         self.save_period = float(self.get_parameter('save_period').value)
+        self._dropped_nodigit = 0   # require_digit 로 보류된 칸 수(저장 시 경고용)
 
         self.scan = None
         self._latest_digit = -1
@@ -108,7 +114,8 @@ class ColorMapper(Node):
 
         self.get_logger().info(
             f"color_mapper(v3 topic-driven) 시작 — 근접 max_range={self.max_range}m, "
-            f"grid_res={self.grid_res}m, min_votes={self.min_votes}, 저장:{self.save_path}")
+            f"grid_res={self.grid_res}m, min_votes={self.min_votes}, "
+            f"require_digit={self.require_digit}, 저장:{self.save_path}")
 
     # ──────────────────────────────────────────────────────────────
     def scan_cb(self, msg):
@@ -168,8 +175,10 @@ class ColorMapper(Node):
         self.publish_markers()
 
     def finalized(self):
-        """채택된 칸만: [(color, cx, cy, votes, digit_or_None), ...]"""
+        """채택된 칸만: [(color, cx, cy, votes, digit_or_None), ...].
+        require_digit 면 digit 없는 칸은 보류(저장 제외)하고 _dropped_nodigit 로 센다."""
         out = []
+        self._dropped_nodigit = 0
         for (gx, gy), cnt in self.votes.items():
             total = sum(cnt.values())
             if total < self.min_votes:
@@ -178,6 +187,9 @@ class ColorMapper(Node):
             cx, cy = self.cell_center(gx, gy)
             dcell = self.digit_votes.get((gx, gy), {})
             digit = max(dcell, key=dcell.get) if dcell else None
+            if self.require_digit and digit is None:
+                self._dropped_nodigit += 1     # 색만 잡힘 → 숫자 읽을 때까지 보류
+                continue
             out.append((color, cx, cy, cnt[color], digit))
         return out
 
@@ -211,6 +223,10 @@ class ColorMapper(Node):
 
     def save_cb(self):
         fin = self.finalized()
+        if self.require_digit and self._dropped_nodigit:
+            self.get_logger().warn(
+                f"숫자 미상으로 {self._dropped_nodigit}칸 보류(require_digit) — "
+                f"해당 패널 재접근해 숫자를 읽혀야 저장됨")
         if not fin:
             return
         data = {c: [] for c in VALID_COLORS}

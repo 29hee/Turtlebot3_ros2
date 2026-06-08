@@ -108,8 +108,12 @@ def generate_launch_description():
         cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
+    # require_digit 를 digit 플래그와 묶는다 — digit:=false 면 색만 저장(빈 맵 방지),
+    #   digit:=true 면 '색+숫자 둘 다' 인식된 칸만 저장.
     mapper_proc = ExecuteProcess(
-        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        cmd=['python3', color_mapper, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['require_digit:=', digit]],
         condition=IfCondition(explore), output='screen',
     )
     # 매핑 중 라이브 품질 체크리스트(색별 벽수/digit/누락 경고).
