@@ -18,6 +18,9 @@ front-facing the panel. This file is a navigation map, not a manual.
 
 - `pkgs/` — all ROS2 packages (ament_python and ament_cmake). Primary work surface.
 - `pkgs/capstone_color_maze/` — color-maze worlds, maps, and navigation scripts.
+- `pkgs/rosout_otel_bridge/` — exports `/rosout` logs into the observability stack.
+- `observability/` — local OTel stack (collector + VictoriaLogs/Metrics/Traces) that
+  collects and manages logs; see `observability/docs/ROS2.md` for ROS2 log ingestion.
 - `data/` — datasets and recordings (rosbag `.db3`, model weights are git-ignored).
 - `deps.repos` — external dependencies imported via `vcs import`.
 - `docs/` — harness documentation set.
