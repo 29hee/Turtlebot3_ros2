@@ -114,10 +114,11 @@ class ColorMapper(Node):
         self.pub_marker = self.create_publisher(MarkerArray, '/color_landmarks', 10)
         self.create_timer(self.save_period, self.save_cb)
 
+        _mode = "색+숫자 둘 다 필수(단일패스)" if self.require_digit else "색 좌표만(2-pass Phase1)"
         self.get_logger().info(
             f"color_mapper(v3 topic-driven) 시작 — 근접 max_range={self.max_range}m, "
             f"grid_res={self.grid_res}m, min_votes={self.min_votes}, "
-            f"색+숫자 둘 다 필수, 저장:{self.save_path}")
+            f"{_mode}, 저장:{self.save_path}")
 
     # ──────────────────────────────────────────────────────────────
     def scan_cb(self, msg):

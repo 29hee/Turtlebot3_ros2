@@ -170,11 +170,14 @@ def generate_launch_description():
              '-p', ['landmarks_path:='] + landmarks],
         condition=IfCondition(explore), output='screen',
     )
-    # 숫자 인식기(EasyOCR) — 색+숫자 둘 다 저장이 필수이므로 매핑에 '상시' 동반.
-    #   /detected_digit 발행 → color_mapper 가 격자 digit 투표. (EasyOCR 미설치면 맵이 빈다.)
+    # 숫자 인식기(EasyOCR) — 단일패스(require_digit=true)에서만 동반.
+    #   2-pass Phase1(two_pass:=true)은 '색 좌표만' 모으므로 숫자 인식이 불필요(숫자는 finalize.launch
+    #   Phase2 가 정면 방문해 읽는다). EasyOCR 은 무거우니 Phase1 에선 아예 안 띄워 CPU 절약+혼란 방지.
+    digit_cond = PythonExpression(
+        ["'", explore, "' == 'true' and '", two_pass, "' == 'false'"])
     digit_proc = ExecuteProcess(
         cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
-        condition=IfCondition(explore), output='screen',
+        condition=IfCondition(digit_cond), output='screen',
     )
     # ── 탐사 종료 → 점유격자맵 자동저장 (맵 핸드오프 자동화) ──────────────────
     #   탐사기(maze/scan/wall 중 실행된 것)가 끝나면 map_saver_cli 로 /map 을 저장한다.
