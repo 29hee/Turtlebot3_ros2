@@ -1,0 +1,26 @@
+ros2 + colcon quick reference for agents.
+Distribution is fixed to Humble. Target model is TurtleBot3 Burger.
+
+Commands
+- source /opt/ros/humble/setup.bash      # source ROS2 every shell
+- source install/setup.bash              # source the workspace after build
+- colcon build --symlink-install         # build all packages, editable Python installs
+- colcon build --packages-select <pkg>   # build a single package
+- colcon test --packages-select <pkg>    # run a package's tests
+- rosdep install --from-paths src --ignore-src -r -y   # resolve dependencies
+- vcs import src < deps.repos             # pull external repos listed in deps.repos
+- ros2 run <pkg> <executable>             # run a node
+- ros2 launch <pkg> <launch_file>         # run a launch file
+- ros2 topic list / ros2 node list        # inspect the running graph
+
+Constraints
+- Always source ROS2 and the workspace before running nodes.
+- Custom msg/srv/action types belong only in my_robot_interfaces.
+- Set TURTLEBOT3_MODEL=burger and a deliberate ROS_DOMAIN_ID before running.
+- Never commit build/, install/, log/.
+
+Pitfalls
+- Forgetting to re-source install/setup.bash after a rebuild yields stale nodes.
+- Mismatched ROS_DOMAIN_ID hides nodes from each other on shared networks.
+- Mixing ament_python and ament_cmake build types in one package breaks the build.
+- Editing installed files instead of src when not using --symlink-install.

@@ -1,0 +1,22 @@
+Nav2 + SLAM quick reference for agents.
+Used for mapping the environment and navigating to a chosen number's pose.
+
+Commands
+- ros2 launch slam_toolbox online_async_launch.py     # live SLAM mapping
+- ros2 run nav2_map_server map_saver_cli -f <name>     # save a scanned map
+- ros2 launch nav2_bringup bringup_launch.py map:=<name>.yaml   # localize + navigate
+- ros2 launch turtlebot3_navigation2 navigation2.launch.py map:=<name>.yaml
+- ros2 topic pub /goal_pose geometry_msgs/PoseStamped ...   # send a goal pose
+- ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose ...
+
+Constraints
+- Save the map (.yaml + .pgm) before switching from mapping to navigation.
+- A goal is a full pose: position AND orientation. Front-facing alignment is encoded
+  in the goal yaw, so compute the yaw that points the robot at the panel.
+- AMCL/localization must be initialized before sending goals.
+
+Pitfalls
+- Sending only a position with arbitrary yaw leaves the robot facing the wrong way.
+- Goal poses inside lethal/inflated costmap cells are rejected or never reached.
+- Re-running SLAM over an existing map without saving loses prior work.
+- Frame mismatches (map vs odom vs base_link) cause goals to resolve incorrectly.

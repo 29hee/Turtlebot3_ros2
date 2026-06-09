@@ -1,0 +1,24 @@
+OpenCV + vision quick reference for agents.
+Used to detect colored panels and read the numbers printed on them.
+
+Commands / building blocks
+- cv2.cvtColor(img, cv2.COLOR_BGR2HSV)        # color segmentation in HSV
+- cv2.inRange(hsv, low, high)                  # threshold a color band
+- cv2.findContours(...)                        # locate panel regions
+- cv2.boundingRect / minAreaRect               # panel bbox and orientation
+- cv2.solvePnP(...)                            # estimate panel pose from camera
+- number recognition: template matching, a small CNN, or an OCR step on the ROI
+- cv_bridge: convert sensor_msgs/Image <-> cv2 in a ROS2 node
+
+Constraints
+- The camera is fixed to the robot heading (forward-facing). Perceived panel size
+  and skew encode the relative angle between the robot and the wall-mounted panel.
+- HSV thresholds depend on lighting; calibrate for the actual environment.
+- Recognition must output a confidence so navigation can reject weak detections.
+
+Pitfalls
+- RGB vs BGR vs HSV confusion produces empty masks.
+- Panels seen at a steep angle are skewed; deskew (perspective warp) before OCR.
+- Motion blur during driving degrades recognition — prefer detecting while stopped
+  or moving slowly, then refine.
+- A panel detected in the camera frame still needs a map-frame coordinate via tf2.
