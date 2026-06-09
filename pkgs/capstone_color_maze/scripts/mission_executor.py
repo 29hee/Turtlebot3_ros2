@@ -3,6 +3,11 @@
 mission_executor.py
 색상 시맨틱맵(color_landmarks.yaml)을 이용한 미션 자율주행.  [Phase 4]
 
+  ⚠️ DEPRECATED (구 사양): 이 노드는 '가장 가까운 한 벽만 들렀다가 출구(-1.5,-1.5)로
+     복귀'하는 *수정 이전* 동작이다. 현재 사양에는 출구가 없고, target 색의 '모든' 벽을
+     순회하며 각 벽을 60%로 확인한 뒤 '마지막 확인 벽'에서 정지하고 /maze_done 을
+     발행한다. 런타임은 maze_tour.py 를 사용하라. 이 파일은 참고용으로만 남겨둔다.
+
 미션: 입력 색(예 "RED") 을 받으면
   1) 색맵에서 로봇과 가장 가까운 그 색 셀(벽)을 고르고
   2) 그 벽 앞 '접근 포즈'(벽에서 standoff 만큼 떨어져 벽을 바라봄)로 Nav2 주행 → 잠깐 정찰("들렀다")
@@ -19,6 +24,7 @@ mission_executor.py
   # 색은 인자 또는 파라미터로:  python3 mission_executor.py --ros-args -p target_color:=BLUE
 """
 import math
+import os
 import sys
 import time
 
@@ -49,8 +55,10 @@ class MissionExecutor(Node):
 
         # ── 파라미터 ──────────────────────────────────────────────
         self.declare_parameter('target_color', '')         # 빈값이면 argv 에서 읽음
+        # 이 스크립트 기준 ../maps/color_landmarks.yaml (하드코딩 절대경로 제거)
+        _here = os.path.dirname(os.path.realpath(__file__))
         self.declare_parameter('landmarks_path',
-            '/home/user/workspace/ros2_project/capstone_color_maze/maps/color_landmarks.yaml')
+            os.path.join(os.path.dirname(_here), 'maps', 'color_landmarks.yaml'))
         self.declare_parameter('exit_x', -1.5)
         self.declare_parameter('exit_y', -1.5)
         self.declare_parameter('standoff', 0.45)            # 벽 앞 정지 거리 [m]
@@ -83,8 +91,13 @@ class MissionExecutor(Node):
 
     # ── 유틸 ──────────────────────────────────────────────────────
     def load_landmarks(self):
-        with open(self.landmarks_path) as f:
-            data = yaml.safe_load(f) or {}
+        # 파일 없음/깨짐이 노드를 죽이지 않게 가드 → run() 의 'cells 없음' 분기로 안전 처리.
+        try:
+            with open(self.landmarks_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            self.get_logger().error(f'색맵 읽기 실패({e})')
+            return []
         return data.get(self.target) or []
 
     def get_robot_xy(self, timeout=10.0):

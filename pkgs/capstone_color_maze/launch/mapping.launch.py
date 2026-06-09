@@ -17,49 +17,177 @@ color_maze.world 에서 TurtleBot3 로 SLAM(slam_toolbox) 매핑.
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import (
+    IncludeLaunchDescription, DeclareLaunchArgument, ExecuteProcess,
+    SetEnvironmentVariable, RegisterEventHandler, Shutdown,
+)
+from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch.substitutions import LaunchConfiguration, PythonExpression
+
+# ★ 매핑 때도 카메라(작품 색 감지)가 필요하므로 카메라 포함 모델을 강제한다.
+#   표준 'burger' 는 카메라 sdf 가 없어 color_mapper 가 색을 못 본다. (color_maze.launch.py 와 동일)
+ROBOT_MODEL = 'burger_cam'
+os.environ['TURTLEBOT3_MODEL'] = ROBOT_MODEL
 
 
 def generate_launch_description():
     here = os.path.dirname(os.path.realpath(__file__))
-    world = os.path.join(os.path.dirname(here), 'worlds', 'color_maze.world')
+    pkg = os.path.dirname(here)
+    world = os.path.join(pkg, 'worlds', 'color_room.world')
+    wall_follower = os.path.join(pkg, 'scripts', 'wall_follower.py')
+    scan_explorer = os.path.join(pkg, 'scripts', 'scan_explorer.py')
+    maze_explorer = os.path.join(pkg, 'scripts', 'maze_explorer.py')
+    color_mapper = os.path.join(pkg, 'scripts', 'color_mapper.py')
+    vision_node = os.path.join(pkg, 'scripts', 'vision_node.py')
+    quality_monitor = os.path.join(pkg, 'scripts', 'quality_monitor.py')
+    digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
+    image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
+    mode_guard = os.path.join(pkg, 'scripts', 'mode_guard.py')
 
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
-    x_pose = LaunchConfiguration('x_pose', default='-1.5')
-    y_pose = LaunchConfiguration('y_pose', default='-1.5')
+    # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
+    #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
+    sim = LaunchConfiguration('sim', default='false')   # ★ 실로봇 전용 — 가제보 제거됨
+    use_sim_time = LaunchConfiguration('use_sim_time', default=sim)   # sim 따라감(실로봇=false)
+    x_pose = LaunchConfiguration('x_pose', default='-2.0')
+    y_pose = LaunchConfiguration('y_pose', default='-2.0')
+    explore = LaunchConfiguration('explore', default='true')   # 자율 탐색+색매핑 동시 구동
+    # 탐사기 선택: maze(색-반응 근접캡처+안티스턱, 권장) | scan(구 느린360°스캔) | wall(단순 벽타기)
+    explorer = LaunchConfiguration('explorer', default='maze')
+    # 거꾸로 장착 카메라 보정을 'image_upright 한 곳'에서만 한다(실로봇=sim:=false 일 때).
+    #   flip = image_upright 회전 모드(180|v|h). 우리 버거는 180. 카메라가 똑바르면 none.
+    #   배선: v4l2(→ /camera/image_raw_rot) → image_upright(회전) → /camera/image_raw(똑바름)
+    #         → vision_node·digit_recognizer 는 회전 없이 이걸 구독(이중회전 방지).
+    flip = LaunchConfiguration('flip', default='180')
+    # 가제보 GUI 창(gzclient) 표시 여부. 기본 false=안 띄움(물리 gzserver 는 그대로 동작).
+    #   로봇 움직임은 RViz(맵+라이다+색마커)로 보면 충분. 굳이 가제보 창 보려면 gui:=true.
+    gui = LaunchConfiguration('gui', default='false')
+    # 종료는 본래 '미방문 소진'이지만 폭주 방지 시간 상한.
+    duration = LaunchConfiguration('duration', default='600')
+    # 탐사 종료 시 점유격자맵을 저장할 경로(확장자 없이). 런타임 기본맵과 '같은 이름'으로
+    #   덮어써, 방금 만든 점유맵 + color_landmarks.yaml 이 같은 SLAM 좌표 한 쌍이 되게 한다.
+    map_save = LaunchConfiguration('map_save', default=os.path.join(pkg, 'maps', 'color_room'))
+    # 매핑 종료 품질 게이트: 자연 종료 시 색+숫자 벽이 이 수 미만이면 재탐사(0=끔).
+    min_walls = LaunchConfiguration('min_walls', default='1')
 
-    gazebo_ros = get_package_share_directory('gazebo_ros')
-    tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
     slam_toolbox = get_package_share_directory('slam_toolbox')
 
-    gzserver = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzserver.launch.py')),
-        launch_arguments={'world': world}.items(),
-    )
-    gzclient = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzclient.launch.py')),
-    )
-    rsp = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(tb3_gazebo, 'launch', 'robot_state_publisher.launch.py')),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
-    )
-    spawn = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(tb3_gazebo, 'launch', 'spawn_turtlebot3.launch.py')),
-        launch_arguments={'x_pose': x_pose, 'y_pose': y_pose}.items(),
-    )
+    # ★ 가제보(시뮬) 전부 제거 — 이 런치는 실로봇 전용이다.
+    #   gzserver/gzclient/spawn/robot_state_publisher 를 띄우지 않는다(이게 켜지면 실로봇 TF 와
+    #   충돌해 TF_OLD_DATA 폭주). 로봇 bringup(Pi)이 /scan·TF·odom 을, image_upright(PC)가
+    #   /camera/image_raw 를 제공한다.
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(slam_toolbox, 'launch', 'online_async_launch.py')),
         launch_arguments={'use_sim_time': use_sim_time}.items(),
     )
 
+    # 색 라벨 누적(격자 투표 → color_landmarks.yaml)을 돕는 탐사 주행.
+    #  explorer:=scan → scan_explorer(벽면 카메라 매핑용: 주기적 느린 360°회전으로 벽 face-on 스캔)
+    #  explorer:=wall → wall_follower(단순 오른손 벽타기)
+    maze_cond = PythonExpression(
+        ["'", explore, "' == 'true' and '", explorer, "' == 'maze'"])
+    scan_cond = PythonExpression(
+        ["'", explore, "' == 'true' and '", explorer, "' == 'scan'"])
+    wall_cond = PythonExpression(
+        ["'", explore, "' == 'true' and '", explorer, "' == 'wall'"])
+    maze_proc = ExecuteProcess(
+        cmd=['python3', maze_explorer, '--duration', duration,
+             '--ros-args', '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['min_quality_walls:=', min_walls]],
+        condition=IfCondition(maze_cond), output='screen',
+    )
+    scan_proc = ExecuteProcess(
+        cmd=['python3', scan_explorer, '--duration', duration],
+        condition=IfCondition(scan_cond), output='screen',
+    )
+    wf_proc = ExecuteProcess(
+        cmd=['python3', wall_follower, '--duration', duration],
+        condition=IfCondition(wall_cond), output='screen',
+    )
+    # 카메라 상하반전 보정 — '한 곳에서만'(실로봇). v4l2 의 _rot(거꾸로)을 받아 똑바로 세워
+    #   /camera/image_raw 를 채운다. compressed_in=false(raw _rot 구독, 안정). 대역폭 더 줄이려면
+    #   Pi 에 compressed_image_transport 깔고 compressed_in:=true.
+    upright_proc = ExecuteProcess(
+        cmd=['python3', image_upright, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['flip:=', flip], '-p', 'compressed_in:=false'],
+        condition=IfCondition(PythonExpression(["'", sim, "' == 'false'"])), output='screen',
+    )
+    # 단일 디코더 — 영상을 한 번만 풀어 /detected_color, /color_signal 발행(나머지가 구독).
+    #   회전은 image_upright 가 끝냈으니 여기선 rotate_180 안 함(기본 false).
+    vision_proc = ExecuteProcess(
+        cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(explore), output='screen',
+    )
+    # color_mapper 는 '색+숫자 둘 다' 인식된 칸만 저장(무조건) → digit_recognizer 가 필수다.
+    mapper_proc = ExecuteProcess(
+        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(explore), output='screen',
+    )
+    # 매핑 중 라이브 품질 체크리스트(색별 벽수/digit/누락 경고).
+    quality_proc = ExecuteProcess(
+        cmd=['python3', quality_monitor],
+        condition=IfCondition(explore), output='screen',
+    )
+    # 숫자 인식기(EasyOCR) — 색+숫자 둘 다 저장이 필수이므로 매핑에 '상시' 동반.
+    #   /detected_digit 발행 → color_mapper 가 격자 digit 투표. (EasyOCR 미설치면 맵이 빈다.)
+    digit_proc = ExecuteProcess(
+        cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        condition=IfCondition(explore), output='screen',
+    )
+
+    # ── 탐사 종료 → 점유격자맵 자동저장 (맵 핸드오프 자동화) ──────────────────
+    #   탐사기(maze/scan/wall 중 실행된 것)가 끝나면 map_saver_cli 로 /map 을 저장한다.
+    #   '미방문 소진/시간상한'으로 정상 종료될 때 저장됨. (수동 map_saver 깜빡 방지.)
+    def _map_saver():
+        return ExecuteProcess(
+            cmd=['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', map_save,
+                 '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+            output='screen',
+        )
+    # ── 모드 가드: 런타임 스택(AMCL/Nav2/maze_tour)이 떠 있으면 매핑 시작 차단 ──
+    guard_proc = ExecuteProcess(
+        cmd=['python3', mode_guard, '--expect', 'mapping'], output='screen')
+
+    def _guard_exit(event, context):
+        if event.returncode != 0:
+            return [Shutdown(reason='mode_guard: 런타임과 동시구동 충돌 — 매핑 시작 중단')]
+        return []
+    guard_handler = RegisterEventHandler(
+        OnProcessExit(target_action=guard_proc, on_exit=_guard_exit))
+
+    save_on_maze = RegisterEventHandler(
+        OnProcessExit(target_action=maze_proc, on_exit=[_map_saver()]))
+    save_on_scan = RegisterEventHandler(
+        OnProcessExit(target_action=scan_proc, on_exit=[_map_saver()]))
+    save_on_wall = RegisterEventHandler(
+        OnProcessExit(target_action=wf_proc, on_exit=[_map_saver()]))
+
     return LaunchDescription([
-        DeclareLaunchArgument('x_pose', default_value='-1.5'),
-        DeclareLaunchArgument('y_pose', default_value='-1.5'),
-        gzserver, gzclient, rsp, spawn, slam,
+        # 자식 프로세스(gzserver/스폰)도 카메라 모델을 상속받도록 런치 환경에 고정
+        SetEnvironmentVariable('TURTLEBOT3_MODEL', ROBOT_MODEL),
+        DeclareLaunchArgument('x_pose', default_value='-2.0'),
+        DeclareLaunchArgument('y_pose', default_value='-2.0'),
+        DeclareLaunchArgument('explore', default_value='true',
+                              description='자율 탐색+색매핑 동시 구동(false=SLAM만)'),
+        DeclareLaunchArgument('explorer', default_value='maze',
+                              description='maze=색반응 근접캡처(권장) | scan=느린360°스캔 | wall=단순벽타기'),
+        # image_upright 회전 모드(실로봇만 동작). 우리 버거 카메라는 거꾸로(직접 확인) → 180.
+        #   카메라가 똑바르면 flip:=none.
+        DeclareLaunchArgument('flip', default_value='180',
+                              description='image_upright 회전(180|v|h|none). 실로봇 카메라 거꾸로면 180'),
+        DeclareLaunchArgument('sim', default_value='false',
+                              description='실로봇 전용 — 가제보 제거됨(호환용 인자, true 줘도 가제보 안 켜짐)'),
+        DeclareLaunchArgument('duration', default_value='600',
+                              description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
+        DeclareLaunchArgument('map_save', default_value=os.path.join(pkg, 'maps', 'color_room'),
+                              description='탐사 종료 시 점유격자맵 저장 경로(확장자 없이)'),
+        DeclareLaunchArgument('min_walls', default_value='1',
+                              description='매핑 종료 품질 게이트: 색+숫자 벽 최소수(미달이면 재탐사, 0=끔)'),
+        guard_proc, guard_handler,
+        slam,
+        upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
+        save_on_maze, save_on_scan, save_on_wall,
     ])

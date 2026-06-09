@@ -3,14 +3,13 @@
 color_detector.py
 TurtleBot3(burger_cam) 의 /camera/image_raw 를 받아 미로 벽의 R/G/B 색을 인식한다.
 
-Phase 2 - 1단계 (초안):
+기능(색 전용):
   - 카메라 영상 구독 → cv_bridge 로 OpenCV 변환
-  - HSV inRange 로 Red / Green / Blue 마스크 생성
-  - 화면 중앙 ROI(로봇 정면) 에서 가장 우세한 색을 판정
-  - 결과를 화면에 표시(디버그) + std_msgs/String 으로 /detected_color 발행
+  - HSV inRange 로 Red / Green / Blue 마스크 → 중앙 ROI 에서 우세 색 판정 → /detected_color(String)
+  - show:=true 면 색·마스크를 화면에 표시(실조명 HSV 보정용 디버그 도구)
 
-다음 단계 예정: 검출 시 TF(map->base_link) + 라이다 정면거리로 색 벽의 map 좌표를 추정해
-              color_landmarks.yaml 에 누적 저장.
+숫자 인식은 별도 노드 digit_recognizer.py(EasyOCR) 가 전담한다(/detected_digit 발행).
+  → 여기서는 색만. 색 범위는 maze_common.COLOR_RANGES 단일 출처.
 
 실행(패키지화 전, 스크립트 직접):
     source /opt/ros/humble/setup.bash
@@ -20,22 +19,15 @@ Phase 2 - 1단계 (초안):
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 import cv2
 import numpy as np
 from cv_bridge import CvBridge
 
+from maze_common import COLOR_RANGES   # HSV 색 범위 단일 출처
 
-# ── HSV 색 범위 (OpenCV: H 0~179, S 0~255, V 0~255) ──────────────────────────
-# Gazebo/Red·Green·Blue 는 채도가 높은 순색이라 아래 범위로 충분. 조명에 따라 미세조정.
-COLOR_RANGES = {
-    # 빨강은 Hue 가 0 부근에서 끊겨 두 구간으로 나눠 잡는다.
-    'RED':   [((0, 100, 70),   (10, 255, 255)),
-              ((170, 100, 70), (179, 255, 255))],
-    'GREEN': [((40, 80, 50),   (85, 255, 255))],
-    'BLUE':  [((100, 120, 50), (130, 255, 255))],
-}
 
 # 화면에 그릴 색(BGR)
 DRAW_BGR = {'RED': (0, 0, 255), 'GREEN': (0, 255, 0), 'BLUE': (255, 0, 0), 'NONE': (200, 200, 200)}
@@ -48,21 +40,27 @@ class ColorDetector(Node):
         # ── 파라미터 ──────────────────────────────────────────────
         self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('show', True)          # cv2.imshow 디버그 창
-        self.declare_parameter('roi_ratio', 0.4)      # 중앙 ROI 한 변 비율(0~1)
+        self.declare_parameter('roi_ratio', 0.7)      # 중앙 ROI 한 변 비율(0~1). 크게=색을 더 넓게 본다
         self.declare_parameter('min_ratio', 0.05)     # ROI 내 색 픽셀이 이 비율 넘어야 '검출'
+        # 카메라 상하반전 보정은 보통 image_upright.py 가 소스에서 처리(표준 토픽이 똑바로).
+        # 이 노드를 image_upright 없이 거꾸로 영상에 직접 물릴 때만 -p rotate_180:=true.
+        self.declare_parameter('rotate_180', False)
 
         image_topic = self.get_parameter('image_topic').value
         self.show = bool(self.get_parameter('show').value)
         self.roi_ratio = float(self.get_parameter('roi_ratio').value)
         self.min_ratio = float(self.get_parameter('min_ratio').value)
+        self.rotate_180 = bool(self.get_parameter('rotate_180').value)
 
         self.bridge = CvBridge()
         self.last_color = None
 
-        self.sub = self.create_subscription(Image, image_topic, self.image_callback, 10)
+        self.sub = self.create_subscription(
+            Image, image_topic, self.image_callback, qos_profile_sensor_data)
         self.pub = self.create_publisher(String, '/detected_color', 10)
 
-        self.get_logger().info(f"color_detector 시작 — 구독: {image_topic}, show={self.show}")
+        self.get_logger().info(
+            f"color_detector(색 전용) 시작 — 구독: {image_topic}, show={self.show}")
 
     # ──────────────────────────────────────────────────────────────
     def make_mask(self, hsv, color):
@@ -83,6 +81,9 @@ class ColorDetector(Node):
             self.get_logger().warn(f"cv_bridge 변환 실패: {e}")
             return
 
+        if self.rotate_180:                       # 거꾸로 장착된 카메라 바로 세우기(보정 미사용 시)
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+
         h, w = frame.shape[:2]
 
         # 중앙 ROI (로봇 정면) 좌표
@@ -102,10 +103,10 @@ class ColorDetector(Node):
         best = max(ratios, key=ratios.get)
         detected = best if ratios[best] >= self.min_ratio else 'NONE'
 
-        # 색이 바뀔 때만 로그(스팸 방지)
+        # 색이 바뀔 때만 로그(스팸 방지). 모든 색 비율을 함께 출력.
         if detected != self.last_color:
-            self.get_logger().info(
-                f"검출: {detected}  (R={ratios['RED']:.2f} G={ratios['GREEN']:.2f} B={ratios['BLUE']:.2f})")
+            ratio_str = ' '.join(f"{c[0]}={ratios[c]:.2f}" for c in COLOR_RANGES)
+            self.get_logger().info(f"검출: {detected}  ({ratio_str})")
             self.last_color = detected
 
         # /detected_color 발행 (NONE 도 발행해 하위 노드가 상태를 알 수 있게)
@@ -115,9 +116,9 @@ class ColorDetector(Node):
         if self.show:
             box = DRAW_BGR[detected]
             cv2.rectangle(frame, (x1, y1), (x2, y2), box, 2)
-            cv2.putText(frame, f"{detected} ({ratios.get(detected, 0):.2f})"
-                        if detected != 'NONE' else "NONE",
-                        (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box, 2)
+            label = f"{detected} ({ratios.get(detected, 0):.2f})" if detected != 'NONE' else "NONE"
+            cv2.putText(frame, label, (x1, max(20, y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, box, 2)
             cv2.imshow("color_detector", frame)
             cv2.waitKey(1)   # GUI 갱신 필수
 

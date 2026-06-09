@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
 color_mapper.py
-TurtleBot3(burger_cam) 로 미로를 돌며, 정면에서 본 색 벽(R/G/B)의 map 좌표를 추정해
-색상 시맨틱맵(color_landmarks.yaml)을 누적 구축한다.  [Phase 2 - 2단계]
+미로를 돌며 '정면 근접에서 본' 색 벽(R/G/B)의 map 좌표를 추정해 색상 시맨틱맵
+(color_landmarks.yaml)을 누적 구축한다. 숫자(digit)도 격자별로 함께 투표·저장한다.
 
-[v2] 중복 방지: 자유점 클러스터링 대신 '격자 투표(grid voting)' 사용.
-  - 투영점을 grid_res 격자로 스냅 → 같은 칸이면 같은 벽으로 간주
-  - 칸마다 색별 득표 누적 → 최종은 칸별 '최다 득표' 색, 단 총득표 >= min_votes 인 칸만
-  - 한 벽을 여러 번/여러 각도로 봐도 같은 칸으로 합쳐지고, 1~2회 노이즈는 탈락한다.
+[v3] 색 계산을 직접 하지 않는다 — vision_node 가 푼 /detected_color 와 digit_recognizer 의
+  /detected_digit 만 구독한다(단일 디코딩: PC CPU 절약). 라이다 정면거리 + TF 로 투영해
+  격자 투표한다.
+
+[근접 전용] max_range 를 짧게(기본 0.8m) 둔다 → 멀리서 흐릿하게 본 색을 엉뚱한 칸에
+  투영하던 과거 실패를 차단. maze_explorer 가 패널 ~0.3m 까지 접근해 dwell 하는 동안의
+  '확실한 근접 관측'만 표로 쌓인다.
+
+격자 투표(grid voting): 투영점을 grid_res 칸으로 스냅 → 칸마다 색·digit 득표 누적 →
+  최종은 칸별 최다 득표(총득표 >= min_votes 인 칸만). 한 벽을 여러 번 봐도 한 칸으로 합쳐진다.
 
 입력:
-  /camera/image_raw   (sensor_msgs/Image)     정면 색 판정
-  /scan               (sensor_msgs/LaserScan)  정면 거리
-  TF  map -> base_link                         로봇 위치/자세
-
+  /detected_color (std_msgs/String)       vision_node 우세색
+  /detected_digit (std_msgs/Int32)        digit_recognizer 숫자(-1=없음)
+  /scan           (sensor_msgs/LaserScan) 정면 거리
+  TF  map -> base_link                     로봇 위치/자세
 출력:
-  maps/color_landmarks.yaml   {RED:[{x,y,votes}], GREEN:[...], BLUE:[...]}
+  maps/color_landmarks.yaml   {RED:[{x,y,votes,digit}], ...}  (색+숫자 둘 다 인식된 칸만)
   /color_landmarks            (visualization_msgs/MarkerArray)  RViz 시각화
 
-전제: TF 'map' 프레임 필요 → mapping.launch.py(slam_toolbox) 또는 AMCL 가동 중이어야 함.
-
-실행(패키지화 전):
-    source /opt/ros/humble/setup.bash
-    source /home/user/Workspace/turtlebot3_ws/install/setup.bash
-    python3 color_mapper.py
+전제: TF 'map' 프레임(slam_toolbox 또는 AMCL). vision_node 가 /detected_color 를 발행 중이어야 함.
+실행: python3 color_mapper.py --ros-args -p use_sim_time:=true
 """
 import math
 import os
@@ -31,26 +33,25 @@ import os
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
+from rclpy.qos import qos_profile_sensor_data
 
 import numpy as np
-import cv2
 import yaml
-from cv_bridge import CvBridge
 
-from sensor_msgs.msg import Image, LaserScan
-from std_msgs.msg import String
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Int32, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 import tf2_ros
 
+from maze_common import VALID_COLORS, normalize_color
 
-# ── HSV 색 범위 (color_detector 와 동일) ─────────────────────────────────────
-COLOR_RANGES = {
-    'RED':   [((0, 100, 70),   (10, 255, 255)),
-              ((170, 100, 70), (179, 255, 255))],
-    'GREEN': [((40, 80, 50),   (85, 255, 255))],
-    'BLUE':  [((100, 120, 50), (130, 255, 255))],
-}
+
+def default_landmarks_path():
+    here = os.path.dirname(os.path.realpath(__file__))
+    return os.path.join(os.path.dirname(here), 'maps', 'color_landmarks.yaml')
+
+
 MARKER_RGB = {'RED': (1.0, 0.0, 0.0), 'GREEN': (0.0, 1.0, 0.0), 'BLUE': (0.0, 0.3, 1.0)}
 
 
@@ -71,56 +72,52 @@ class ColorMapper(Node):
     def __init__(self):
         super().__init__('color_mapper')
 
-        # ── 파라미터 ──────────────────────────────────────────────
-        self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('roi_ratio', 0.4)       # 중앙 ROI 비율
-        self.declare_parameter('min_ratio', 0.10)      # 검출 인정 ROI 색 비율
         self.declare_parameter('min_range', 0.12)      # 유효 정면거리 하한 [m]
-        self.declare_parameter('max_range', 1.5)       # 유효 정면거리 상한 [m]
-        self.declare_parameter('grid_res', 0.30)       # 격자 한 변 [m] (스냅 단위)
-        self.declare_parameter('min_votes', 5)         # 이 득표 이상인 칸만 최종 채택
-        self.declare_parameter('save_path',
-            '/home/user/workspace/ros2_project/capstone_color_maze/maps/color_landmarks.yaml')
+        # ★ 근접 전용 상한. maze_explorer 가 ~0.3m 까지 접근하므로 0.8 이면 충분.
+        #   크게 두면 멀리서 본 색이 엉뚱한 칸에 투영돼 맵이 더러워진다(과거 실패).
+        self.declare_parameter('max_range', 0.8)
+        self.declare_parameter('grid_res', 0.30)       # 격자 한 변 [m]
+        self.declare_parameter('min_votes', 5)         # 이 득표 이상인 칸만 채택
+        self.declare_parameter('save_path', default_landmarks_path())
         self.declare_parameter('save_period', 3.0)
 
-        self.image_topic = self.get_parameter('image_topic').value
         self.map_frame = self.get_parameter('map_frame').value
         self.base_frame = self.get_parameter('base_frame').value
-        self.roi_ratio = float(self.get_parameter('roi_ratio').value)
-        self.min_ratio = float(self.get_parameter('min_ratio').value)
         self.min_range = float(self.get_parameter('min_range').value)
         self.max_range = float(self.get_parameter('max_range').value)
         self.grid_res = float(self.get_parameter('grid_res').value)
         self.min_votes = int(self.get_parameter('min_votes').value)
         self.save_path = self.get_parameter('save_path').value
         self.save_period = float(self.get_parameter('save_period').value)
+        self._dropped_nodigit = 0   # 숫자 미상으로 보류된 칸 수(저장 시 경고용)
 
-        # ── 상태 ──────────────────────────────────────────────────
-        self.bridge = CvBridge()
         self.scan = None
-        # 격자 투표: {(gx,gy): {'RED':n,'GREEN':n,'BLUE':n}}  gx,gy 는 칸 인덱스(int)
-        self.votes = {}
+        self._latest_digit = -1
+        self.votes = {}        # {(gx,gy): {'RED':n,...}}
+        self.digit_votes = {}  # {(gx,gy): {digit:count}}
 
-        # TF
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # I/O
-        self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
-        self.create_subscription(Image, self.image_topic, self.image_cb, 5)
-        self.pub_color = self.create_publisher(String, '/detected_color', 10)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
+        self.create_subscription(String, '/detected_color', self.color_cb, 10)
+        self.create_subscription(Int32, '/detected_digit', self.digit_cb, 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/color_landmarks', 10)
         self.create_timer(self.save_period, self.save_cb)
 
         self.get_logger().info(
-            f"color_mapper(v2 grid-voting) 시작 — grid_res={self.grid_res}m, "
-            f"min_votes={self.min_votes}, 저장:{self.save_path}")
+            f"color_mapper(v3 topic-driven) 시작 — 근접 max_range={self.max_range}m, "
+            f"grid_res={self.grid_res}m, min_votes={self.min_votes}, "
+            f"색+숫자 둘 다 필수, 저장:{self.save_path}")
 
     # ──────────────────────────────────────────────────────────────
     def scan_cb(self, msg):
         self.scan = msg
+
+    def digit_cb(self, msg):
+        self._latest_digit = int(msg.data)
 
     def front_range(self):
         s = self.scan
@@ -136,47 +133,20 @@ class ColorMapper(Node):
                 vals.append(r)
         return float(np.median(vals)) if vals else None
 
-    def dominant_color(self, frame):
-        h, w = frame.shape[:2]
-        rw, rh = int(w * self.roi_ratio), int(h * self.roi_ratio)
-        x1, y1 = (w - rw) // 2, (h - rh) // 2
-        hsv = cv2.cvtColor(frame[y1:y1 + rh, x1:x1 + rw], cv2.COLOR_BGR2HSV)
-        area = max(1, rw * rh)
-        kernel = np.ones((3, 3), np.uint8)
-        ratios = {}
-        for color, ranges in COLOR_RANGES.items():
-            mask = None
-            for lo, hi in ranges:
-                m = cv2.inRange(hsv, np.array(lo), np.array(hi))
-                mask = m if mask is None else cv2.bitwise_or(mask, m)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            ratios[color] = int(cv2.countNonZero(mask)) / area
-        best = max(ratios, key=ratios.get)
-        return (best, ratios[best]) if ratios[best] >= self.min_ratio else ('NONE', ratios[best])
-
-    def image_cb(self, msg):
-        try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        except Exception as e:
-            self.get_logger().warn(f"cv_bridge 변환 실패: {e}")
+    def color_cb(self, msg):
+        """vision_node 우세색 수신 → 근접·TF 유효 시 격자 투표."""
+        color = normalize_color(msg.data)
+        if color is None:                 # 'NONE' 등
             return
-
-        color, _ = self.dominant_color(frame)
-        self.pub_color.publish(String(data=color))
-        if color == 'NONE':
-            return
-
         d = self.front_range()
         if d is None or not (self.min_range <= d <= self.max_range):
-            return
-
+            return                        # 근접 게이트: 멀면 기록 안 함
         try:
             tf = self.tf_buffer.lookup_transform(
                 self.map_frame, self.base_frame, rclpy.time.Time())
         except (tf2_ros.LookupException, tf2_ros.ExtrapolationException,
                 tf2_ros.ConnectivityException):
             return
-
         t = tf.transform.translation
         q = (tf.transform.rotation.x, tf.transform.rotation.y,
              tf.transform.rotation.z, tf.transform.rotation.w)
@@ -192,32 +162,49 @@ class ColorMapper(Node):
 
     def vote(self, color, x, y):
         key = self.cell_of(x, y)
-        cell = self.votes.setdefault(key, {'RED': 0, 'GREEN': 0, 'BLUE': 0})
+        cell = self.votes.setdefault(key, {c: 0 for c in VALID_COLORS})
         cell[color] += 1
+        if self._latest_digit >= 0:
+            dcell = self.digit_votes.setdefault(key, {})
+            dcell[self._latest_digit] = dcell.get(self._latest_digit, 0) + 1
         self.publish_markers()
 
     def finalized(self):
-        """채택된 칸만: [(color, cx, cy, votes), ...]"""
+        """채택된 칸만: [(color, cx, cy, votes, digit), ...].
+        ★ 색+숫자 둘 다 인식된 칸만 채택한다(무조건). digit 없는 칸은 보류(저장 제외)하고
+        _dropped_nodigit 로 세어 '재접근해 숫자 읽어야 함'을 알린다."""
         out = []
+        self._dropped_nodigit = 0
         for (gx, gy), cnt in self.votes.items():
             total = sum(cnt.values())
             if total < self.min_votes:
                 continue
             color = max(cnt, key=cnt.get)
             cx, cy = self.cell_center(gx, gy)
-            out.append((color, cx, cy, cnt[color]))
-        return out
+            dcell = self.digit_votes.get((gx, gy), {})
+            digit = max(dcell, key=dcell.get) if dcell else None
+            if digit is None:
+                self._dropped_nodigit += 1     # 색만 잡힘 → 숫자 읽을 때까지 보류(색+숫자 필수)
+                continue
+            out.append((color, cx, cy, cnt[color], digit))
+        # ★ 동일 (색,숫자) 조합은 절대 중복 저장 안 함 — 한 패널이 인접 칸 여러 개로 잡혀도
+        #   득표 최다 칸 하나만 남긴다(같은 숫자 2개 저장 방지).
+        best = {}
+        for color, cx, cy, v, digit in out:
+            k = (color, digit)
+            if k not in best or v > best[k][3]:
+                best[k] = (color, cx, cy, v, digit)
+        return list(best.values())
 
     # ── 출력 ──────────────────────────────────────────────────────
     def publish_markers(self):
         arr = MarkerArray()
-        # 이전 마커 전체 삭제 후 다시 그림(채택 칸만 보이도록)
         clear = Marker()
         clear.header.frame_id = self.map_frame
         clear.action = Marker.DELETEALL
         arr.markers.append(clear)
         mid = 0
-        for color, cx, cy, _ in self.finalized():
+        for color, cx, cy, _, _ in self.finalized():
             r, g, b = MARKER_RGB[color]
             m = Marker()
             m.header.frame_id = self.map_frame
@@ -239,11 +226,18 @@ class ColorMapper(Node):
 
     def save_cb(self):
         fin = self.finalized()
+        if self._dropped_nodigit:
+            self.get_logger().warn(
+                f"숫자 미상으로 {self._dropped_nodigit}칸 보류 — "
+                f"색+숫자 둘 다 인식돼야 저장됨. 해당 패널 재접근해 숫자를 읽힐 것")
         if not fin:
             return
-        data = {c: [] for c in COLOR_RANGES}
-        for color, cx, cy, v in fin:
-            data[color].append({'x': round(cx, 3), 'y': round(cy, 3), 'votes': v})
+        data = {c: [] for c in VALID_COLORS}
+        for color, cx, cy, v, digit in fin:
+            entry = {'x': round(cx, 3), 'y': round(cy, 3), 'votes': v}
+            if digit is not None:
+                entry['digit'] = digit
+            data[color].append(entry)
         try:
             os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
             with open(self.save_path, 'w') as f:
