@@ -48,10 +48,15 @@ class ImageUpright(Node):
                                ParameterDescriptor(dynamic_typing=True))
         # True: 무선 절약 위해 in_topic+'/compressed'(JPEG) 구독. False: raw Image 구독.
         self.declare_parameter('compressed_in', True)
+        # RViz/rqt 뷰어 전용 토픽. out_topic 은 파이프라인용(BEST_EFFORT)이라 RViz 가
+        #   기본(RELIABLE)으로 구독하면 QoS 불일치로 못 본다 → 이 토픽은 RELIABLE 로 발행해
+        #   RViz Image 디스플레이가 바로 보게 한다. (이 노드는 PC 에서 돌아 무선 부하 없음.)
+        self.declare_parameter('view_topic', '/camera/image_upright')
 
         in_topic = self.get_parameter('in_topic').value
         out_topic = self.get_parameter('out_topic').value
         self.out_topic = out_topic
+        view_topic = self.get_parameter('view_topic').value
         self.flip = str(self.get_parameter('flip').value).lower()
         self.compressed_in = bool(self.get_parameter('compressed_in').value)
         if self.flip not in ('180', 'v', 'h'):
@@ -63,6 +68,9 @@ class ImageUpright(Node):
         # 똑바로 선 '압축' 영상도 함께 발행 → WiFi 에서 RViz/rqt 가 정방향 영상을 가볍게 확인.
         self.pub_c = self.create_publisher(
             CompressedImage, out_topic + '/compressed', qos_profile_sensor_data)
+        # RViz 전용 뷰 토픽(RELIABLE, 기본 QoS) — RViz Image 디스플레이가 QoS 설정 없이 바로 봄.
+        self.pub_view = self.create_publisher(Image, view_topic, 10)
+        self.view_topic = view_topic
 
         if self.compressed_in:
             self.sub = self.create_subscription(
@@ -75,6 +83,7 @@ class ImageUpright(Node):
             src = in_topic
         self.get_logger().info(
             f"image_upright 시작 — {src} → {out_topic}(+/compressed) "
+            f"+ 뷰토픽 {view_topic}(RViz용 RELIABLE) "
             f"(flip={self.flip}, compressed_in={self.compressed_in})")
 
         # ★ '순차 보장' 가드: out_topic 은 image_upright 만 발행해야 한다. v4l2 가 _rot 으로
@@ -125,6 +134,7 @@ class ImageUpright(Node):
         out = self.bridge.cv2_to_imgmsg(img, encoding='bgr8')
         out.header = header        # 타임스탬프/frame_id 보존 → TF·RViz 시간 동기 유지
         self.pub.publish(out)
+        self.pub_view.publish(out)   # RViz 전용(RELIABLE) — 파이프라인과 동일 프레임
 
         # 압축본(JPEG) 동시 발행 — /camera/image_raw/compressed (대역폭 절약 뷰어용)
         cmsg = CompressedImage()

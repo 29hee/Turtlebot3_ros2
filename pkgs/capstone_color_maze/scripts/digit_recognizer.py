@@ -41,8 +41,9 @@ class DigitRecognizer(Node):
 
         self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('roi_ratio', 0.5)     # 중앙 ROI 한 변 비율
-        self.declare_parameter('gate_ratio', 0.20)   # ROI 색 점유율 ≥ 이 값일 때만 OCR(근접 판정)
-        self.declare_parameter('conf_min', 0.4)      # EasyOCR 확신도(0~1) 이 이상만 채택
+        self.declare_parameter('gate_ratio', 0.12)   # ROI 색 점유율 ≥ 이 값일 때만 OCR(근접 판정)
+        self.declare_parameter('conf_min', 0.8)      # EasyOCR 확신도(0~1) 이 이상만 채택(확실할 때만)
+        self.declare_parameter('allowlist', '123')   # 인식 대상 숫자(현재 작품번호 1·2·3만)
         self.declare_parameter('max_rate', 4.0)      # OCR 최대 호출 빈도 [Hz] (EasyOCR 보호)
         # ★ 거꾸로 장착 카메라 보정. 숫자는 방향에 민감 — 거꾸로면 EasyOCR 가 못 읽는다(실로봇=true).
         self.declare_parameter('rotate_180', False)
@@ -52,6 +53,7 @@ class DigitRecognizer(Node):
         self.roi_ratio = float(self.get_parameter('roi_ratio').value)
         self.gate_ratio = float(self.get_parameter('gate_ratio').value)
         self.conf_min = float(self.get_parameter('conf_min').value)
+        self.allowlist = str(self.get_parameter('allowlist').value)
         self.max_rate = float(self.get_parameter('max_rate').value)
         self.rotate_180 = bool(self.get_parameter('rotate_180').value)
         self.show = bool(self.get_parameter('show').value)
@@ -97,15 +99,15 @@ class DigitRecognizer(Node):
         except Exception:
             pass
         try:
-            results = self._reader.readtext(roi_bgr, allowlist='0123456789', detail=1)
+            results = self._reader.readtext(roi_bgr, allowlist=self.allowlist, detail=1)
         except Exception as e:
             self.get_logger().warn(f"OCR 실패: {e}")
             return -1, 0.0
         best_d, best_c = -1, -1.0
         for (_, text, conf) in results:
             text = text.strip()
-            # 작품 번호는 한 자리(0~9) 전제. 멀티문자 토큰은 오인식으로 보고 버림.
-            if len(text) == 1 and text.isdigit() and conf > best_c:
+            # 작품 번호는 한 자리(현재 1·2·3) 전제. 멀티문자/대상 외 숫자는 오인식으로 버림.
+            if len(text) == 1 and text in self.allowlist and conf > best_c:
                 best_d, best_c = int(text), float(conf)
         if best_d >= 0 and best_c >= self.conf_min:
             return best_d, best_c
