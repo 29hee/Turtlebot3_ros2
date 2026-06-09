@@ -44,6 +44,7 @@ def generate_launch_description():
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
     image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
     mode_guard = os.path.join(pkg, 'scripts', 'mode_guard.py')
+    scan_restamp = os.path.join(pkg, 'scripts', 'scan_restamp.py')
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     start_gazebo = LaunchConfiguration('start_gazebo', default='false')
@@ -108,6 +109,12 @@ def generate_launch_description():
         cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         output='screen',
     )
+    # ── 스캔 리스탬프 릴레이: /scan → /scan_synced(stamp=now) — Pi↔PC 클럭 skew 무시 ──
+    #   amcl/costmap 이 /scan_synced 를 구독(nav2_maze.yaml) → stamp 드롭 없이 동작(시간동기 불필요).
+    scan_restamp_proc = ExecuteProcess(
+        cmd=['python3', scan_restamp, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        output='screen',
+    )
     # ── 모드 가드: 매핑 스택(slam_toolbox/maze_explorer/color_mapper)이 떠 있으면 차단 ──
     guard_proc = ExecuteProcess(
         cmd=['python3', mode_guard, '--expect', 'runtime'], output='screen')
@@ -134,6 +141,7 @@ def generate_launch_description():
         guard_proc, guard_handler,
         gazebo,
         nav2,
+        scan_restamp_proc,
         confirm_proc,
         tour_proc,
         upright_proc,

@@ -80,6 +80,9 @@ class MazeTour(Node):
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('confirm_window', 4.0)   # 도착 후 확인 관측 시간 [s]
         self.declare_parameter('confirm_min_true', 3)   # 이 횟수 이상 True 면 확인
+        self.declare_parameter('confirm_retries', 2)         # 확인 실패 시 '뒤로+재확인' 반복 횟수
+        self.declare_parameter('confirm_backup_speed', 0.07) # 뒤로 물러나는 속도 [m/s]
+        self.declare_parameter('confirm_backup_secs', 1.5)   # 뒤로 물러나는 시간 [s] (~0.1m, 화각 확보)
         # 시작 시 자기위치 재추정(relocalization). SLAM 매핑 땐 불필요(위치 고정)하고,
         # 실로봇 런타임에선 켠 위치가 맵 어디인지 모르므로 true 로 켜서, 전역 파티클을
         # 흩뿌린 뒤 제자리 회전으로 AMCL 을 수렴시키고 나서 순회를 시작한다.
@@ -95,6 +98,7 @@ class MazeTour(Node):
         self.declare_parameter('relocalize_max_turns', 3.0)  # 최대 회전 바퀴 수(상한)
         self.declare_parameter('relocalize_pos_std', 0.25)   # 위치 표준편차 임계 [m]
         self.declare_parameter('relocalize_yaw_std', 0.35)   # yaw 표준편차 임계 [rad]
+        self.declare_parameter('goto_center', True)          # 위치추정 시 맵 중앙으로 실제 주행 후 재수렴
 
         init_color, init_digit = parse_target(self.get_parameter('target_color').value)
         self.target = init_color
@@ -106,7 +110,11 @@ class MazeTour(Node):
         self.base_frame = self.get_parameter('base_frame').value
         self.confirm_window = float(self.get_parameter('confirm_window').value)
         self.confirm_min_true = int(self.get_parameter('confirm_min_true').value)
+        self.confirm_retries = int(self.get_parameter('confirm_retries').value)
+        self.confirm_backup_speed = float(self.get_parameter('confirm_backup_speed').value)
+        self.confirm_backup_secs = float(self.get_parameter('confirm_backup_secs').value)
         self.relocalize = bool(self.get_parameter('relocalize').value)
+        self.goto_center = bool(self.get_parameter('goto_center').value)
         self.relocalize_speed = float(self.get_parameter('relocalize_speed').value)
         self.relocalize_max_turns = float(self.get_parameter('relocalize_max_turns').value)
         self.relocalize_pos_std = float(self.get_parameter('relocalize_pos_std').value)
@@ -228,6 +236,17 @@ class MazeTour(Node):
         self.get_logger().info(f'[{label}] {"도착" if ok else "실패(status=%d)" % status}')
         return ok
 
+    def _nudge_back(self):
+        """확인 실패 시 조금 뒤로 물러나 카메라 화각 확보(패널이 너무 가까워 안 잡힐 때).
+        Nav2 목표는 이미 끝난 상태라 cmd_vel 직접 발행으로 짧게 후진한다."""
+        t = Twist()
+        t.linear.x = -abs(self.confirm_backup_speed)
+        end = time.time() + self.confirm_backup_secs
+        while time.time() < end and rclpy.ok():
+            self.cmd_pub.publish(t)
+            rclpy.spin_once(self, timeout_sec=0.05)
+        self.cmd_pub.publish(Twist())   # 정지
+
     def await_confirmation(self):
         """도착 후 confirm_window 초간 색(+숫자) 확인.
         - target_digit 없음: 색 확인만 (기존 동작)
@@ -262,7 +281,23 @@ class MazeTour(Node):
             self._amcl_cov = None   # 분산 직후 옛 공분산으로 조기수렴 오판 방지
         else:
             self.get_logger().warn('전역 재초기화 서비스 없음 — 회전만으로 수렴 시도')
-        # 2) 공분산이 임계 이하로 떨어질 때까지 회전(최대 relocalize_max_turns 바퀴)
+        # 2) 제자리 회전으로 대략 수렴(거친 추정)
+        self._spin_to_converge()
+        # 3) ★ 맵 중앙으로 '실제 주행' 후 재수렴 — 파티클(점)만 모으지 말고 로봇이 중앙
+        #    개활지로 이동해 위치추정을 다진다.
+        if self.goto_center:
+            ctr = self._map_center()
+            if ctr is None:
+                self.get_logger().warn('맵 중앙 계산 불가(랜드마크 없음) — 중앙 이동 생략')
+            else:
+                here = self.get_robot_xy(timeout=2.0)
+                yaw = math.atan2(ctr[1] - here[1], ctr[0] - here[0]) if here else 0.0
+                self.get_logger().info(f'맵 중앙({ctr[0]:.2f},{ctr[1]:.2f})으로 실제 이동 후 재수렴')
+                if self.nav_to(ctr[0], ctr[1], yaw, '맵 중앙'):
+                    self._spin_to_converge()
+
+    def _spin_to_converge(self):
+        """제자리 회전하며 AMCL 공분산이 임계 이하로 수렴할 때까지 대기(상한 max_turns)."""
         max_dur = self.relocalize_max_turns * 2.0 * math.pi / max(0.05, self.relocalize_speed)
         self.get_logger().info(
             f'자기위치 추정 회전 — 수렴까지(상한 {self.relocalize_max_turns:.1f}바퀴/'
@@ -290,12 +325,27 @@ class MazeTour(Node):
         if converged and c is not None:
             ps = max(math.sqrt(max(c[0], 0.0)), math.sqrt(max(c[7], 0.0)))
             ys = math.sqrt(max(c[35], 0.0))
-            self.get_logger().info(
-                f'AMCL 수렴 완료(pos_std={ps:.3f}m, yaw_std={ys:.3f}rad) → 순회 시작')
+            self.get_logger().info(f'AMCL 수렴 완료(pos_std={ps:.3f}m, yaw_std={ys:.3f}rad)')
         else:
             self.get_logger().warn(
                 '최대 회전까지 공분산 임계 미달 — 그대로 진행(confirm 실패 가능). '
                 'relocalize_max_turns 를 늘리거나 맵/스캔 품질 점검 권장.')
+
+    def _map_center(self):
+        """color_landmarks.yaml 전체 랜드마크의 무게중심 ≈ 맵 중앙(개활지 추정)."""
+        try:
+            with open(self.landmarks_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            return None
+        xs, ys = [], []
+        for walls in data.values():
+            for w in (walls or []):
+                if 'x' in w and 'y' in w:
+                    xs.append(float(w['x'])); ys.append(float(w['y']))
+        if not xs:
+            return None
+        return (sum(xs) / len(xs), sum(ys) / len(ys))
 
     # ── 서비스 루프 ────────────────────────────────────────────────
     def serve(self):
@@ -418,7 +468,7 @@ class MazeTour(Node):
         confirmed = []          # [(id, x, y, ax, ay, yaw), ...] 확인된 벽
         failed = []             # [(id, 사유), ...] 접근/확인 실패한 벽
         for w in order:
-            wid = w['id']
+            wid = w.get('digit', w['id'])   # 표시·로그는 '숫자' 기준(id 인덱스와 혼동 방지)
             ax, ay, yaw = approach_pose(w['x'], w['y'], self.standoff)
             label = f'{kor} {wid}번 ({w["x"]:.2f},{w["y"]:.2f})'
             if not self.nav_to(ax, ay, yaw, label):
@@ -426,7 +476,15 @@ class MazeTour(Node):
                 failed.append((wid, '접근'))
                 continue
             self.get_logger().info(f'{kor} {wid}번에 도착했습니다')
-            if self.await_confirmation():
+            ok = self.await_confirmation()
+            tries = 0
+            while not ok and tries < self.confirm_retries:
+                tries += 1
+                self.get_logger().info(
+                    f'{kor} {wid}번 확인 실패 → 조금 뒤로 물러나 카메라 재확보 ({tries}/{self.confirm_retries})')
+                self._nudge_back()
+                ok = self.await_confirmation()
+            if ok:
                 self.get_logger().info(f'{kor} {wid}번 확인({CONFIRM_THRESHOLD:.0%} 이상)')
                 confirmed.append((wid, w['x'], w['y'], ax, ay, yaw))
                 # 특정 digit 모드: 일치하는 벽 하나 찾으면 바로 완료

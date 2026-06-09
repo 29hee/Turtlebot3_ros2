@@ -48,7 +48,7 @@ def generate_launch_description():
 
     # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
     #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
-    sim = LaunchConfiguration('sim', default='true')
+    sim = LaunchConfiguration('sim', default='false')   # ★ 실로봇 전용 — 가제보 제거됨
     use_sim_time = LaunchConfiguration('use_sim_time', default=sim)   # sim 따라감(실로봇=false)
     x_pose = LaunchConfiguration('x_pose', default='-2.0')
     y_pose = LaunchConfiguration('y_pose', default='-2.0')
@@ -71,33 +71,12 @@ def generate_launch_description():
     # 매핑 종료 품질 게이트: 자연 종료 시 색+숫자 벽이 이 수 미만이면 재탐사(0=끔).
     min_walls = LaunchConfiguration('min_walls', default='1')
 
-    gazebo_ros = get_package_share_directory('gazebo_ros')
-    tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
     slam_toolbox = get_package_share_directory('slam_toolbox')
 
-    gzserver = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzserver.launch.py')),
-        launch_arguments={'world': world}.items(),
-        condition=IfCondition(sim),     # 실로봇(sim:=false)이면 안 띄움
-    )
-    gzclient = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzclient.launch.py')),
-        # 시뮬 + gui:=true 일 때만 가제보 창 표시
-        condition=IfCondition(PythonExpression(
-            ["'", sim, "' == 'true' and '", gui, "' == 'true'"])),
-    )
-    rsp = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(tb3_gazebo, 'launch', 'robot_state_publisher.launch.py')),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
-        condition=IfCondition(sim),     # 실로봇은 로봇 bringup 이 TF/rsp 제공 → 안 띄움
-    )
-    spawn = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(tb3_gazebo, 'launch', 'spawn_turtlebot3.launch.py')),
-        launch_arguments={'x_pose': x_pose, 'y_pose': y_pose}.items(),
-        condition=IfCondition(sim),     # 실로봇엔 스폰 없음
-    )
+    # ★ 가제보(시뮬) 전부 제거 — 이 런치는 실로봇 전용이다.
+    #   gzserver/gzclient/spawn/robot_state_publisher 를 띄우지 않는다(이게 켜지면 실로봇 TF 와
+    #   충돌해 TF_OLD_DATA 폭주). 로봇 bringup(Pi)이 /scan·TF·odom 을, image_upright(PC)가
+    #   /camera/image_raw 를 제공한다.
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(slam_toolbox, 'launch', 'online_async_launch.py')),
@@ -199,10 +178,8 @@ def generate_launch_description():
         #   카메라가 똑바르면 flip:=none.
         DeclareLaunchArgument('flip', default_value='180',
                               description='image_upright 회전(180|v|h|none). 실로봇 카메라 거꾸로면 180'),
-        DeclareLaunchArgument('sim', default_value='true',
-                              description='true=시뮬(gazebo) | false=실로봇(gazebo/spawn/rsp 안 띄움)'),
-        DeclareLaunchArgument('gui', default_value='false',
-                              description='가제보 GUI 창 표시(기본 false=안 띄움, RViz 로 관찰)'),
+        DeclareLaunchArgument('sim', default_value='false',
+                              description='실로봇 전용 — 가제보 제거됨(호환용 인자, true 줘도 가제보 안 켜짐)'),
         DeclareLaunchArgument('duration', default_value='600',
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         DeclareLaunchArgument('map_save', default_value=os.path.join(pkg, 'maps', 'color_room'),
@@ -210,7 +187,7 @@ def generate_launch_description():
         DeclareLaunchArgument('min_walls', default_value='1',
                               description='매핑 종료 품질 게이트: 색+숫자 벽 최소수(미달이면 재탐사, 0=끔)'),
         guard_proc, guard_handler,
-        gzserver, gzclient, rsp, spawn, slam,
+        slam,
         upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
         save_on_maze, save_on_scan, save_on_wall,
     ])

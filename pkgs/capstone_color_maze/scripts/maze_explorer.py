@@ -26,6 +26,7 @@ maze_explorer.py — 색-반응형 매핑 탐사 주행 (scan_explorer 대체).
 import math
 import os
 import sys
+import time
 
 import yaml
 
@@ -60,9 +61,9 @@ class MazeExplorer(Node):
         # (중복 선언하면 ParameterAlreadyDeclaredException 으로 노드가 죽는다).
 
         # ── 주행/벽타기 파라미터 ─────────────────────────────────────
-        self.declare_parameter('v_fwd', 0.08)        # 전진 속도 [m/s] (느리게 — 색 놓치지 않게)
-        self.declare_parameter('target_right', 0.45)  # 오른쪽 벽 유지 거리 [m]
-        self.declare_parameter('front_stop', 0.45)    # 전방 정지 임계 [m]
+        self.declare_parameter('v_fwd', 0.12)        # 전진 속도 [m/s] (조금 빠르게 — 색은 서보로 추적)
+        self.declare_parameter('target_right', 0.50)  # 오른쪽 벽 유지 거리 [m] (벽서 50cm↑ — 정면접근 여유)
+        self.declare_parameter('front_stop', 0.50)    # 전방 정지 임계 [m] (전방 벽도 50cm 규칙; 좁은 미로면 ↓)
         self.declare_parameter('spin_speed', 0.25)    # 회전 각속도 [rad/s] (느리게! SLAM 보호)
         # ── 색 접근(비주얼 서보) 파라미터 ───────────────────────────
         # 작은 색 조각(≈5%)만 보여도 그쪽으로 정렬·접근하도록 낮게 둔다.
@@ -70,6 +71,14 @@ class MazeExplorer(Node):
         self.declare_parameter('standoff', 0.30)      # 패널 앞 정지 거리(라이다 정면) [m]
         self.declare_parameter('capture_secs', 4.0)   # 근접 dwell 상한 [s] (숫자 확실 확인 시 조기복귀)
         self.declare_parameter('dedup_dist', 0.6)     # 이 거리 내 이미 캡처한 패널이면 재접근 스킵 [m]
+        self.declare_parameter('dedup_res', 0.5)      # 패널 추정좌표 양자화 격자 [m] (지터 제거 → 같은 칸=같은 패널)
+        self.declare_parameter('cam_half_fov', 0.5)   # cx(-1~1)→각도 환산용 카메라 반FOV [rad] (패널 방향 투사)
+        # 정면 접근 서보: 숫자(blob) 중심 정렬 + 패널 정면(수직) 맞춤.
+        self.declare_parameter('cx_gain', 0.6)        # blob 중심 정렬 게인(cx→회전)
+        self.declare_parameter('perp_range', 0.6)     # 이 거리 안쪽서 좌우 라이다 대칭으로 정면 맞춤 [m]
+        self.declare_parameter('perp_cx_gate', 0.35)  # blob 이 이만큼 중앙일 때만 정면 보정(충돌 방지)
+        self.declare_parameter('perp_gain', 0.5)      # 정면(수직) 보정 게인
+        self.declare_parameter('perp_deadband', 0.05) # 좌우 라이다 차 이 이하는 무시 [m]
         # ── 안티-스턱 파라미터 ───────────────────────────────────────
         self.declare_parameter('visit_res', 0.4)      # 방문 격자 한 변 [m]
         self.declare_parameter('stuck_win', 8.0)      # 진행 점검 윈도 [s]
@@ -80,6 +89,8 @@ class MazeExplorer(Node):
         # 색 접근이 이 시간 안에 근접(standoff) 도달 못 하면 포기하고 벽타기 복귀.
         #   (어안렌즈로 색 중심 정렬이 안 돼 제자리 회전만 하는 무한루프 방지.)
         self.declare_parameter('approach_timeout', 20.0)
+        # 한 개 찾을(캡처할) 때마다 접근 시간초과를 이만큼 늘려, 남은 게 적을수록 끈질기게 찾는다.
+        self.declare_parameter('approach_timeout_step', 5.0)
         # ── 센서/odom 생존 워치독 ────────────────────────────────────
         #   라이다(/scan)나 위치(TF map→base_link)가 끊기면(예: turtlebot3_node 배터리로
         #   사망, 라이다 멈춤) '탐사 중'으로 착각하며 헛돌지 않게 즉시 정지+경고한다.
@@ -99,8 +110,8 @@ class MazeExplorer(Node):
         self.declare_parameter('approach_stall_win', 5.0)    # 이 시간 이동 거의 0이면 포기 [s]
         self.declare_parameter('approach_min_move', 0.08)    # 그 윈도 최소 이동 [m]
         # 캡처/스킵 직후 '그 타겟을 벗어날 때까지' 색 무시하고 전진(같은 타겟 즉시 재트리거 차단).
-        self.declare_parameter('moveon_secs', 4.0)           # 벗어나기 최대 시간 [s]
-        self.declare_parameter('moveon_dist', 0.5)           # 벗어나기 목표 이동거리 [m]
+        self.declare_parameter('moveon_secs', 2.5)           # 벗어나기 최대 시간 [s] (짧게 — 다음 타겟 더 가깝게)
+        self.declare_parameter('moveon_dist', 0.3)           # 벗어나기 목표 이동거리 [m] (격자 중복방지가 동일패널 재접근 차단)
 
         self.total = duration
         self.v_fwd = float(self.get_parameter('v_fwd').value)
@@ -111,6 +122,13 @@ class MazeExplorer(Node):
         self.standoff = float(self.get_parameter('standoff').value)
         self.capture_secs = float(self.get_parameter('capture_secs').value)
         self.dedup_dist = float(self.get_parameter('dedup_dist').value)
+        self.dedup_res = float(self.get_parameter('dedup_res').value)
+        self.cam_half_fov = float(self.get_parameter('cam_half_fov').value)
+        self.cx_gain = float(self.get_parameter('cx_gain').value)
+        self.perp_range = float(self.get_parameter('perp_range').value)
+        self.perp_cx_gate = float(self.get_parameter('perp_cx_gate').value)
+        self.perp_gain = float(self.get_parameter('perp_gain').value)
+        self.perp_deadband = float(self.get_parameter('perp_deadband').value)
         self.visit_res = float(self.get_parameter('visit_res').value)
         self.stuck_win = float(self.get_parameter('stuck_win').value)
         self.stuck_dist = float(self.get_parameter('stuck_dist').value)
@@ -118,6 +136,7 @@ class MazeExplorer(Node):
         self.loop_close_dist = float(self.get_parameter('loop_close_dist').value)
         self.tf_lost_spin = float(self.get_parameter('tf_lost_spin').value)
         self.approach_timeout = float(self.get_parameter('approach_timeout').value)
+        self.approach_timeout_step = float(self.get_parameter('approach_timeout_step').value)
         self.sensor_timeout = float(self.get_parameter('sensor_timeout').value)
         self.pose_lost_limit = float(self.get_parameter('pose_lost_limit').value)
         self.min_quality_walls = int(self.get_parameter('min_quality_walls').value)
@@ -130,12 +149,25 @@ class MazeExplorer(Node):
         self._appr_pose0 = None        # 접근 시작 위치(스톨 감지 기준)
         self._appr_stall_t = None      # 스톨 윈도 기준 시각
         self._moveon_pose0 = None      # MOVEON 시작 위치(벗어난 거리 측정)
+        self._moveon_yaw_target = 0.0  # MOVEON 시작 시 목표 헤딩(=시작+180°)
+        self._moveon_turned = False    # 180° 회전 완료 여부(완료 후 U자 이탈)
         self._resweeps = 0
         self._last_color_t = None   # 마지막으로 색을 본 시각(접근 유예 판정)
         self._appr_cx = 0.0         # 마지막 유효 색 중심 cx(깜빡 동안 서보 방향 유지)
         # color_mapper 와 동일 경로의 color_landmarks.yaml (품질 게이트에서 읽음)
         _here = os.path.dirname(os.path.realpath(__file__))
         self._landmarks_path = os.path.join(os.path.dirname(_here), 'maps', 'color_landmarks.yaml')
+        # ── 로그 분리: 사용자용(터미널+파일) / 진단용(파일에만). 문제 시 이 txt 를 첨부하면 됨. ──
+        self._dbg = None
+        self._dbg_path = None
+        try:
+            _logdir = os.path.join(os.path.dirname(_here), 'logs')
+            os.makedirs(_logdir, exist_ok=True)
+            self._dbg_path = os.path.join(_logdir, 'maze_explorer.log')
+            self._dbg = open(self._dbg_path, 'a', buffering=1)
+            self._dbg.write(f"\n===== maze_explorer 시작 {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+        except Exception:
+            self._dbg = None
 
         # ── IO ───────────────────────────────────────────────────────
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
@@ -178,9 +210,12 @@ class MazeExplorer(Node):
         self._pose_lost_since = None   # TF 위치 끊김 시작 시각
         self._last_sensor_warn = 0.0
         self._last_pose_warn = 0.0
-        self.get_logger().info(
+        self._need_reset = False       # 지속 TF 끊김 → 복구 시 탐사 재초기화 플래그
+        self.user(
             f"maze_explorer 시작 — 색-반응 매핑, total(상한)={self.total:.0f}s, "
             f"standoff={self.standoff}m, stuck<{self.stuck_dist}m/{self.stuck_win:.0f}s")
+        if self._dbg_path:
+            self.get_logger().info(f"진단 로그(문제 시 첨부): {self._dbg_path}")
         self.timer = self.create_timer(0.05, self.on_timer)
 
     # ── 시간/센서 ────────────────────────────────────────────────────
@@ -189,6 +224,22 @@ class MazeExplorer(Node):
 
     def elapsed(self, since):
         return (self.now() - since).nanoseconds / 1e9
+
+    def _tee(self, tag, msg):
+        if self._dbg:
+            try:
+                self._dbg.write(f"{time.strftime('%H:%M:%S')} [{tag}] {msg}\n")
+            except Exception:
+                pass
+
+    def user(self, msg, error=False):
+        """사용자용 로그 — 터미널(+파일). '내가 봐야 하는' 상태/경고만."""
+        (self.get_logger().error if error else self.get_logger().info)(msg)
+        self._tee('USER', msg)
+
+    def diag(self, msg):
+        """진단용 로그 — 파일(logs/maze_explorer.log)에만. 문제 시 나한테 줄 상세."""
+        self._tee('DIAG', msg)
 
     def on_scan(self, msg):
         self.scan = msg
@@ -266,20 +317,32 @@ class MazeExplorer(Node):
         return cmd
 
     def approach_cmd(self):
-        """비주얼 서보: 색 blob 을 화면 중앙에 두고 라이다 정면거리 standoff 까지 전진.
-        (도착여부, Twist). 색을 잃으면 도착 아님으로 반환(상위에서 복귀 처리)."""
+        """비주얼 서보: 숫자(색 blob) 중심을 화면 가운데로 맞추며 라이다 정면거리 standoff
+        까지 전진. 패널 근처에선 좌우 라이다 대칭으로 '정면(수직)'을 맞춰 직사각형 패널을
+        정면에서 읽도록 한다. (도착여부, Twist). 색을 잃으면 도착 아님으로 반환."""
         cmd = Twist()
         # 색이 잠깐 NONE 으로 깜빡해도 '마지막 본 방향(_appr_cx)'으로 계속 서보한다.
         #   (즉시 0 으로 만들면 깜빡마다 직진/정지가 튀어 수렴이 깨진다.)
         cx = self._appr_cx
         front = self.sector_min(-15, 15)
-        # 중심 정렬: cx>0(오른쪽)이면 우회전(-z). 게인 작게(천천히 그쪽을 본다).
-        cmd.angular.z = max(-0.35, min(0.35, -0.6 * cx))
+        # 1) 숫자(blob) 중심 정렬 — cx>0(오른쪽)이면 우회전(-z).
+        yaw_blob = -self.cx_gain * cx
+        # 2) 패널 정면(수직) 정렬 — 근접 시 좌우 라이다 거리를 대칭화(벽에 수직이면 dl≈dr).
+        #    멀리선 0, 가까울수록 가중. blob 이 어느 정도 중앙(perp_cx_gate)일 때만(충돌 방지).
+        yaw_perp = 0.0
+        if math.isfinite(front) and front < self.perp_range and abs(cx) < self.perp_cx_gate:
+            dl = self.sector_min(15, 45)
+            dr = self.sector_min(-45, -15)
+            if math.isfinite(dl) and math.isfinite(dr):
+                w = (self.perp_range - front) / self.perp_range   # 0~1, 가까울수록↑
+                err = dl - dr
+                if abs(err) > self.perp_deadband:                 # 데드밴드 — 미세떨림 무시
+                    yaw_perp = -self.perp_gain * w * err
+        cmd.angular.z = max(-0.35, min(0.35, yaw_blob + yaw_perp))
         if front <= self.standoff:
             return True, Twist()              # 도착(정지)
-        # 정렬도에 비례해 전진 — 단 '바닥값(floor)'을 둬 |cx| 가 커도 제자리회전만 하지 않고
-        #   늘 천천히 다가간다(어안렌즈라 패널이 화면 끝 cx≈0.9 로 잡혀도 전진 유지). 허용폭 0.8.
-        align = max(0.25, 1.0 - abs(cx) / 0.8)
+        # 중심이 안 맞으면 감속(먼저 가운데로 맞추고 직진) — 단 '바닥값'으로 제자리회전만은 방지.
+        align = max(0.2, 1.0 - abs(cx) / 0.6)
         cmd.linear.x = self.v_fwd * align
         return False, cmd
 
@@ -324,8 +387,8 @@ class MazeExplorer(Node):
             now_s = self.elapsed(self.start)
             if now_s - self._last_sensor_warn > 5.0:
                 self._last_sensor_warn = now_s
-                self.get_logger().error(
-                    f'/scan {self.sensor_timeout:.0f}s+ 끊김 — 라이다/로봇 bringup 확인. 정지.')
+                self.user(
+                    f'/scan {self.sensor_timeout:.0f}s+ 끊김 — 라이다/로봇 bringup 확인. 정지.', error=True)
             return
 
         # ★ 색 신호(/color_signal) 생존 감시 — 이게 없으면 색을 못 봐 'approach' 자체가 불가.
@@ -336,9 +399,9 @@ class MazeExplorer(Node):
                  or self.elapsed(self._last_signal_time) > 8.0)
         if now_s > 12.0 and stale and now_s - self._last_sig_warn > 15.0:
             self._last_sig_warn = now_s
-            self.get_logger().warn(
+            self.user(
                 "/color_signal 8s+ 끊김 — vision_node 생존/카메라 Hz 확인 "
-                "(카메라가 매우 느리면 정상일 수 있음).")
+                "(카메라가 매우 느리면 정상일 수 있음).", error=True)
 
         # 현재 상태를 1초마다 방송(quality_monitor/사용자가 실시간으로 뭐 하는지 보게)
         if now_s - self._last_phase_pub > 1.0:
@@ -348,31 +411,35 @@ class MazeExplorer(Node):
 
         pose = self.get_pose()
 
-        # 1) TF 위치 끊김 처리.
+        # 1) TF 위치 끊김 처리. ★ TF(map→base_link) 없으면 '무조건 정지' — 장님 회전/주행 금지.
+        #    (원인 보통: slam map→odom 미발행=Pi↔PC 클럭 어긋남으로 스캔 드롭, 또는 odom 끊김.)
         if pose is None:
             if self._pose_lost_since is None:
                 self._pose_lost_since = self.now()
             lost_for = self.elapsed(self._pose_lost_since)
+            self.pub.publish(Twist())          # 정지 — 위치 모르고 돌면 위험·무의미
+            now_s = self.elapsed(self.start)
+            if lost_for > 3.0 and now_s - self._last_pose_warn > 5.0:
+                self._last_pose_warn = now_s
+                self.user(
+                    f'map→base_link {lost_for:.0f}s 없음 — slam map→odom 미발행(Pi↔PC 클럭 어긋남→'
+                    f'스캔 드롭?) 또는 odom 끊김. 정지 대기. (chronyc makestep / slam·배터리 확인)', error=True)
             if lost_for > self.pose_lost_limit:
-                # 장기 끊김 = 일시적 SLAM 흔들림이 아니라 odom/TF 사망(예: turtlebot3_node
-                #   배터리로 죽음). '장님 주행' 금지 — 정지하고 큰 소리로 알린다.
-                self.pub.publish(Twist())
-                now_s = self.elapsed(self.start)
-                if now_s - self._last_pose_warn > 5.0:
-                    self._last_pose_warn = now_s
-                    self.get_logger().error(
-                        f'위치(TF map→base_link) {lost_for:.0f}s 끊김 — odom/SLAM 사망 의심 '
-                        f'(turtlebot3_node·배터리 확인). 정지.')
-                return
-            # 단기 끊김 — '무한 제자리 회전 금지'(D). 짧게만 돌고, 그 뒤엔 느린 전진으로 칸 변경.
-            c = Twist()
-            if lost_for < self.tf_lost_spin:
-                c.angular.z = self.spin_speed
-            else:
-                c.linear.x = 0.08      # 칸을 바꿔 SLAM 재수렴 유도(제자리 회전은 정보 0)
-            self.pub.publish(c)
+                self._need_reset = True        # 지속 끊김 → 복구되면 재초기화
             return
-        self._pose_lost_since = None   # 위치 정상 → 끊김 타이머 리셋
+        # 위치 정상 — 지속 끊김 후 복구면 탐사 재초기화하고 재개(누적 색 캡처는 보존).
+        if self._pose_lost_since is not None:
+            lost_was = self.elapsed(self._pose_lost_since)
+            self._pose_lost_since = None
+            if self._need_reset:
+                self._need_reset = False
+                self.user(f'TF 복구(끊김 {lost_was:.0f}s) → 탐사 재초기화 후 재개')
+                self.phase = 'PERIMETER'
+                self.interrupt = None
+                self.left_start = False
+                self.start_cell = None
+                self.wd_pose = None
+                self.phase_start = self.now()
 
         # 방문 격자 기록
         self.visited.add(self.cell(pose[0], pose[1]))
@@ -383,7 +450,7 @@ class MazeExplorer(Node):
         #    CAPTURE(정지 dwell 정상) / APPROACH(색 중심 정렬 위해 제자리 회전 가능)는 제외 —
         #    APPROACH 는 자체 approach_timeout 으로 무한루프를 막는다(아래).
         if self.interrupt not in ('CAPTURE', 'APPROACH') and self.watchdog_stuck(pose):
-            self.get_logger().warn('진행 워치독: 갇힘 감지 → 탈출 기동')
+            self.diag('진행 워치독: 갇힘 감지 → 탈출 기동')
             self.publish_phase('ESCAPE')
             self.switch(interrupt='ESCAPE')
 
@@ -405,10 +472,12 @@ class MazeExplorer(Node):
             arrived, cmd = self.approach_cmd()
             # 시간초과: 어안렌즈로 중심 정렬이 안 돼 standoff 도달 실패 → 포기하고 벽타기 복귀.
             #   이 자리를 skipped 로 기억해 바로 재트리거되지 않게 한다.
-            if not arrived and self.elapsed(self.phase_start) >= self.approach_timeout:
-                self.skipped.append(self._target_xy(pose))   # 로봇 위치 아닌 '패널 위치' 저장
-                self.get_logger().warn(
-                    f'접근 시간초과({self.approach_timeout:.0f}s) — 건너뜀 @({pose[0]:.2f},{pose[1]:.2f})')
+            # ★ 기본 20s + 지금까지 찾은(캡처) 개수 × 5s — 남을수록 끈질기게.
+            eff_timeout = self.approach_timeout + self.approach_timeout_step * len(self.captured)
+            if not arrived and self.elapsed(self.phase_start) >= eff_timeout:
+                self.skipped.append(self._panel_xy(pose))   # 로봇 위치 아닌 '패널 칸'(양자화) 저장
+                self.diag(
+                    f'접근 시간초과({eff_timeout:.0f}s, 캡처 {len(self.captured)}개) — 건너뜀 @({pose[0]:.2f},{pose[1]:.2f})')
                 self._start_moveon(pose)
                 return
             # 스톨 감지: 윈도 동안 '거의 안 움직였다' = 제자리 회전만 → 빨리 포기(한 지점 빙빙 차단).
@@ -416,8 +485,8 @@ class MazeExplorer(Node):
                     and self.elapsed(self._appr_stall_t) >= self.approach_stall_win:
                 moved = math.hypot(pose[0] - self._appr_pose0[0], pose[1] - self._appr_pose0[1])
                 if moved < self.approach_min_move:
-                    self.skipped.append(self._target_xy(pose))   # 로봇 위치 아닌 '패널 위치' 저장
-                    self.get_logger().warn(
+                    self.skipped.append(self._panel_xy(pose))   # 로봇 위치 아닌 '패널 칸'(양자화) 저장
+                    self.diag(
                         f'접근 스톨(이동 {moved:.2f}m<{self.approach_min_move}m/{self.approach_stall_win:.0f}s) '
                         f'— 제자리회전 판정, 건너뜀 @({pose[0]:.2f},{pose[1]:.2f})')
                     self._start_moveon(pose)
@@ -431,7 +500,7 @@ class MazeExplorer(Node):
                 return
             if arrived:
                 self.publish_phase(f'CAPTURE {self.color}')
-                self.get_logger().info(f'패널 근접 도달({self.color}) → 숫자 확실 확인 대기(상한 {self.capture_secs:.1f}s)')
+                self.user(f'패널 근접 도달({self.color}) → 숫자 확실 확인 대기(상한 {self.capture_secs:.1f}s)')
                 self._digit = -1               # 이번 캡처에서 '새로' 읽힌 숫자만 인정(이전값 무시)
                 self.switch(interrupt='CAPTURE')
                 return
@@ -444,16 +513,26 @@ class MazeExplorer(Node):
             #   그 즉시 캡처 완료로 보고 원래 가던 국면으로 복귀. 못 읽으면 상한까지 기다린 뒤 복귀.
             got_digit = self._digit >= 0
             if got_digit or self.elapsed(self.phase_start) >= self.capture_secs:
-                self.captured.append(self._target_xy(pose))   # 로봇 위치 아닌 '패널 위치' 저장
+                self.captured.append(self._panel_xy(pose))   # 로봇 위치 아닌 '패널 칸'(양자화) 저장
                 tag = f'숫자 {self._digit} 확인' if got_digit else '숫자 미확인(시간초과)'
-                self.get_logger().info(
+                self.user(
                     f'캡처 완료({tag}) @({pose[0]:.2f},{pose[1]:.2f}) — 총 {len(self.captured)}개')
                 self._start_moveon(pose)       # 그 타겟 벗어날 때까지 전진 후 일반 복귀
             return
 
         if self.interrupt == 'MOVEON':
-            # 방금 캡처/스킵한 타겟에서 moveon_dist/secs 만큼 벗어날 때까지 색 무시하고 전진.
-            #   (벗어나기 전엔 APPROACH 트리거 안 됨 → 같은 타겟 즉시 재접근/무한루프 차단.)
+            # 1) 먼저 제자리 180° 회전 — 패널 정면(벽 코앞)에서 정반대로 돌아 떠날 준비.
+            if not self._moveon_turned:
+                yerr = wrap(self._moveon_yaw_target - pose[2])
+                if abs(yerr) > 0.15:
+                    c = Twist()
+                    c.angular.z = max(-self.spin_speed, min(self.spin_speed, 1.5 * yerr))
+                    self.pub.publish(c)
+                    return
+                self._moveon_turned = True          # 180° 완료 → U자 이탈 시작(기준 재설정)
+                self._moveon_pose0 = (pose[0], pose[1])
+                self.phase_start = self.now()
+            # 2) U자로 벽타며 moveon_dist/secs 만큼 이탈(이 동안 색 무시 → 같은 타겟 재트리거 차단).
             self.pub.publish(self.wall_follow_cmd())
             moved = math.hypot(pose[0] - self._moveon_pose0[0], pose[1] - self._moveon_pose0[1])
             if self.elapsed(self.phase_start) >= self.moveon_secs or moved >= self.moveon_dist:
@@ -472,27 +551,42 @@ class MazeExplorer(Node):
         self.run_phase(pose)
 
     def _target_xy(self, pose):
-        """정면 라이다 거리로 추정한 '패널(타겟) map 좌표' = 로봇 + d·heading.
-        캡처/스킵 중복을 '로봇 위치'가 아니라 '패널 위치' 기준으로 판정하기 위함
-        (같은 패널을 다른 바퀴/각도에서 봐도 한 번만 — green1→green2→red1 무한반복 차단)."""
+        """'색이 보이는 방향'(blob cx)으로 투사한 패널(타겟) map 좌표.
+        정면 라이다가 아니라 색 방향으로 투사 — APPROACH 중 정면이 패널을 안 가리켜도
+        (서보 중) 같은 패널을 일관된 한 점으로 추정한다(중복 판정 정확화)."""
         x, y, yaw = pose
-        d = self.sector_min(-15, 15)
+        bearing = -self._appr_cx * self.cam_half_fov   # cx>0(화면 오른쪽)=로봇 우측(-)
+        deg = math.degrees(bearing)
+        d = self.sector_min(deg - 12.0, deg + 12.0)    # 그 방향 섹터 라이다 거리
         if not math.isfinite(d):
             d = self.standoff
-        d = min(d, 1.0)                 # 너무 먼 추정은 신뢰 X
-        return (x + d * math.cos(yaw), y + d * math.sin(yaw))
+        d = min(d, 1.2)                 # 너무 먼 추정은 신뢰 X
+        ang = yaw + bearing
+        return (x + d * math.cos(ang), y + d * math.sin(ang))
+
+    def _panel_xy(self, pose):
+        """중복 판정용 — _target_xy 를 dedup_res 격자 중심으로 양자화(추정 지터 제거)."""
+        tx, ty = self._target_xy(pose)
+        gx = (math.floor(tx / self.dedup_res) + 0.5) * self.dedup_res
+        gy = (math.floor(ty / self.dedup_res) + 0.5) * self.dedup_res
+        return (gx, gy)
 
     def _start_moveon(self, pose):
-        """캡처/스킵 직후 호출 — 그 타겟을 벗어날 때까지 색 무시하고 전진하는 MOVEON 진입."""
+        """캡처/스킵 직후 호출 — 먼저 제자리 180° 회전 후, 그 타겟을 벗어날 때까지
+        색 무시하고 U자로 벽타며 전진하는 MOVEON 진입."""
         self._moveon_pose0 = (pose[0], pose[1])
+        self._moveon_yaw_target = wrap(pose[2] + math.pi)   # 패널 정면 → 정반대로
+        self._moveon_turned = False
         self.publish_phase('MOVEON')
         self.switch(interrupt='MOVEON')
 
     def _recently_captured(self, pose):
-        """현재 보고 있는 '패널 위치'가 이미 캡처/스킵한 패널 근처면 True(재접근 방지)."""
-        tx, ty = self._target_xy(pose)
+        """현재 보는 '패널 칸'이 이미 캡처/스킵한 칸 근처면 True(재접근 방지).
+        양자화한 칸 중심끼리 비교 → 추정 지터로 같은 패널이 여러 점으로 흩어져
+        재트리거되던 문제 차단."""
+        px, py = self._panel_xy(pose)
         for (cx, cy) in self.captured + self.skipped:
-            if math.hypot(tx - cx, ty - cy) < self.dedup_dist:
+            if math.hypot(px - cx, py - cy) < self.dedup_dist:
                 return True
         return False
 
@@ -508,7 +602,7 @@ class MazeExplorer(Node):
                 self.left_start = True
             if self.left_start and d_start < self.loop_close_dist:
                 self.inward_target = self.visited_centroid()   # (0,0)=시작점 아님 → 둘레 중심으로
-                self.get_logger().info(
+                self.user(
                     f'=== 둘레 한 바퀴(loop closure) → 내부'
                     f'({self.inward_target[0]:+.1f},{self.inward_target[1]:+.1f}) 진입 ===')
                 self.publish_phase('INWARD')
@@ -520,7 +614,7 @@ class MazeExplorer(Node):
             # 맵 중앙(0,0)으로 직진하다 섬 벽을 만나면 섬 벽타기로 전환.
             front = self.sector_min(-20, 20)
             if front < self.front_stop:
-                self.get_logger().info('=== 중앙에서 섬 벽 접촉 → 섬 벽타기 ===')
+                self.user('=== 중앙에서 섬 벽 접촉 → 섬 벽타기 ===')
                 self.publish_phase('ISLAND')
                 self.island_start_cell = cur
                 self.left_start = False
@@ -576,7 +670,7 @@ class MazeExplorer(Node):
             return
         if self._resweeps < self.max_resweeps:
             self._resweeps += 1
-            self.get_logger().warn(
+            self.user(
                 f'품질 미달(색+숫자 벽 {n}/{self.min_quality_walls}) → 재탐사 '
                 f'{self._resweeps}/{self.max_resweeps}: 놓친 숫자 재수집을 위해 다시 돈다')
             self.publish_phase(f'QUALITY_LOW {n}/{self.min_quality_walls}')
@@ -594,7 +688,7 @@ class MazeExplorer(Node):
 
     def stop_and_quit(self, msg):
         self.pub.publish(Twist())
-        self.get_logger().info(msg + f' (캡처 {len(self.captured)}개, 방문셀 {len(self.visited)})')
+        self.user(msg + f' (캡처 {len(self.captured)}개, 방문셀 {len(self.visited)})')
         self.publish_phase('DONE')
         # 타이머 콜백 안에서 shutdown 하면 executor 가 교착 → SystemExit 로 빠져나가 main 정리.
         self.timer.cancel()

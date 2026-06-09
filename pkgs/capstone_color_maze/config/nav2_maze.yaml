@@ -30,14 +30,14 @@ amcl:
     save_pose_rate: 0.5
     sigma_hit: 0.2
     tf_broadcast: true
-    transform_tolerance: 1.0
+    transform_tolerance: 2.0
     update_min_a: 0.2
     update_min_d: 0.25
     z_hit: 0.5
     z_max: 0.05
     z_rand: 0.5
     z_short: 0.05
-    scan_topic: scan
+    scan_topic: scan_synced
     # 런타임 시작 시 로봇은 방 빈 코너 (-2.0,-2.0) 에 있다고 가정하고 AMCL 초기화.
     # (이게 없으면 AMCL 이 (0,0) 으로 추정해 첫 주행이 어긋난다.)
     set_initial_pose: true
@@ -154,7 +154,7 @@ controller_server:
       sim_time: 1.5
       linear_granularity: 0.05
       angular_granularity: 0.025
-      transform_tolerance: 0.2
+      transform_tolerance: 1.0
       xy_goal_tolerance: 0.05
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: True
@@ -183,6 +183,7 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_link
       use_sim_time: False
+      transform_tolerance: 2.0   # Pi↔PC 클럭 skew 흡수 — 스캔 stamp 드롭 방지
       rolling_window: true
       width: 3
       height: 3
@@ -198,7 +199,7 @@ local_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_synced
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -214,7 +215,7 @@ local_costmap:
         mark_threshold: 0
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_synced
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -241,6 +242,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: True
+      transform_tolerance: 2.0   # Pi↔PC 클럭 skew 흡수 — 스캔 stamp 드롭 방지
       robot_radius: 0.11   # Burger 실반경 ~0.105m + 안전 마진
       resolution: 0.05
       track_unknown_space: true
@@ -250,7 +252,7 @@ global_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_synced
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -270,7 +272,7 @@ global_costmap:
         mark_threshold: 0
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_synced
           max_obstacle_height: 2.0
           clearing: True
           marking: True

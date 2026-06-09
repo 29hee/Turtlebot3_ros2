@@ -187,7 +187,14 @@ class ColorMapper(Node):
                 self._dropped_nodigit += 1     # 색만 잡힘 → 숫자 읽을 때까지 보류(색+숫자 필수)
                 continue
             out.append((color, cx, cy, cnt[color], digit))
-        return out
+        # ★ 동일 (색,숫자) 조합은 절대 중복 저장 안 함 — 한 패널이 인접 칸 여러 개로 잡혀도
+        #   득표 최다 칸 하나만 남긴다(같은 숫자 2개 저장 방지).
+        best = {}
+        for color, cx, cy, v, digit in out:
+            k = (color, digit)
+            if k not in best or v > best[k][3]:
+                best[k] = (color, cx, cy, v, digit)
+        return list(best.values())
 
     # ── 출력 ──────────────────────────────────────────────────────
     def publish_markers(self):
