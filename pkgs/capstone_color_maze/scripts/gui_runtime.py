@@ -56,6 +56,7 @@ def _arg(flag, default=None):
     return default
 
 CAM_TOPIC = _arg('--cam-topic', '/camera/image_raw')
+MAP_TOPIC = _arg('--map-topic', '/map')
 BASE_H    = 660
 ROI_RATIO = 0.7
 FPS_LIMIT = 15
@@ -89,11 +90,36 @@ def bgr_to_qpixmap(bgr: np.ndarray) -> QPixmap:
 
 
 def occupancy_to_bgr(msg) -> np.ndarray:
+    """RViz costmap 스타일: unknown=회색, free=흰색, inflation=그라디언트, lethal=검정"""
     w, h = msg.info.width, msg.info.height
     data = np.array(msg.data, dtype=np.int8).reshape(h, w)
-    img  = np.full((h, w, 3), 45, dtype=np.uint8)
-    img[data == 0]   = [62,  66,  72]
-    img[data == 100] = [210, 215, 220]
+
+    img = np.full((h, w, 3), 205, dtype=np.uint8)   # unknown (-1): RViz gray
+    img[data == 0] = [255, 255, 255]                  # free: white
+
+    # inflation zone (1–99): blue→cyan→green→yellow→red (RViz costmap_2d 팔레트)
+    inf_mask = (data >= 1) & (data <= 99)
+    if np.any(inf_mask):
+        t = data[inf_mask].astype(np.float32) / 99.0
+        r = np.zeros(t.shape, np.uint8)
+        g = np.zeros(t.shape, np.uint8)
+        b = np.zeros(t.shape, np.uint8)
+
+        m0 = t < 0.25
+        m1 = (t >= 0.25) & (t < 0.5)
+        m2 = (t >= 0.5)  & (t < 0.75)
+        m3 = t >= 0.75
+
+        b[m0] = 255;  g[m0] = (t[m0] / 0.25 * 255).astype(np.uint8)
+        g[m1] = 255;  b[m1] = ((1 - (t[m1] - 0.25) / 0.25) * 255).astype(np.uint8)
+        g[m2] = 255;  r[m2] = ((t[m2] - 0.5)  / 0.25 * 255).astype(np.uint8)
+        r[m3] = 255;  g[m3] = ((1 - (t[m3] - 0.75) / 0.25) * 255).astype(np.uint8)
+
+        img[inf_mask, 0] = b  # BGR 순서
+        img[inf_mask, 1] = g
+        img[inf_mask, 2] = r
+
+    img[data == 100] = [20, 20, 20]                   # lethal: near-black
     return np.flipud(img)
 
 
@@ -112,7 +138,7 @@ class RuntimeNode(Node, QObject):
     # /rosout 에서 이 노드들의 INFO 이상 메시지를 current action 으로 표시
     _WATCH_NODES = {'maze_tour', 'phase1_explorer', 'phase2_visitor'}
 
-    def __init__(self, cam_topic: str):
+    def __init__(self, cam_topic: str, map_topic: str = '/map'):
         Node.__init__(self, 'gui_runtime')
         QObject.__init__(self)
         self._color_str  = 'NONE'
@@ -136,7 +162,7 @@ class RuntimeNode(Node, QObject):
                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
                 reliability=QoSReliabilityPolicy.RELIABLE,
             )
-            self.create_subscription(OccupancyGrid, '/map', self._map, _map_qos)
+            self.create_subscription(OccupancyGrid, map_topic, self._map, _map_qos)
 
     def _target(self, m): self.sig_target.emit(m.data)
     def _phase(self,  m): self.sig_phase.emit(m.data)
@@ -630,7 +656,7 @@ class RuntimeWindow(QMainWindow):
 # ── 진입점 ──────────────────────────────────────────────────────
 def main():
     rclpy.init()
-    node = RuntimeNode(CAM_TOPIC)
+    node = RuntimeNode(CAM_TOPIC, MAP_TOPIC)
 
     app = QApplication(sys.argv)
     apply_dark_palette(app)
