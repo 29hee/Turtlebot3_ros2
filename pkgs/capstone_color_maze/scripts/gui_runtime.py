@@ -264,6 +264,81 @@ class LogWidget(QScrollArea):
             self.verticalScrollBar().maximum()))
 
 
+# ── 모드 바 ─────────────────────────────────────────────────────
+MODES = [
+    ('로컬라이제이션', '#d29922'),
+    ('탐색',          '#58a6ff'),
+    ('주행',          '#f0883e'),
+    ('발견',          '#3fb950'),
+]
+
+# rosout 메시지 키워드 → 모드 인덱스
+_MODE_KEYWORDS = [
+    (0, ['AMCL', '자기위치', '수렴', '재초기화', '회전 —', '공분산']),
+    (1, ['탐색합니다', '숫자를 탐색', 'digit 탐색', '발견 패스', '탐색 —']),
+    (2, ['주행 →', '] 주행']),
+    (3, ['도착했습니다', '확인(', '완료:', '복귀 후']),
+]
+
+def detect_mode(text: str):
+    """rosout 메시지에서 모드 인덱스 반환. 해당 없으면 None."""
+    for idx, keywords in _MODE_KEYWORDS:
+        if any(k in text for k in keywords):
+            return idx
+    return None
+
+
+class ModeBar(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self._badges = []
+        for i, (label, color) in enumerate(MODES):
+            badge = QLabel(f"  {label}  ")
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            lay.addWidget(badge)
+            self._badges.append((badge, color))
+            if i < len(MODES) - 1:
+                arrow = QLabel("→")
+                arrow.setAlignment(Qt.AlignCenter)
+                arrow.setStyleSheet(f"color:{BORDER};")
+                arrow.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+                lay.addWidget(arrow)
+
+        self._active = -1
+        self._base_pt = 10
+        self._apply_styles()
+
+    def set_mode(self, idx: int):
+        if idx == self._active:
+            return
+        self._active = idx
+        self._apply_styles()
+
+    def _apply_styles(self):
+        for i, (badge, color) in enumerate(self._badges):
+            if i == self._active:
+                badge.setStyleSheet(
+                    f"background:{color}22;color:{color};"
+                    f"border:1px solid {color};border-radius:12px;"
+                    f"font-weight:bold;padding:2px 0;")
+            else:
+                badge.setStyleSheet(
+                    f"background:transparent;color:{TEXT_SEC};"
+                    f"border:1px solid {BORDER};border-radius:12px;"
+                    f"padding:2px 0;")
+
+    def scale_fonts(self, scale):
+        f = font(max(7, round(self._base_pt * scale)))
+        for badge, _ in self._badges:
+            badge.setFont(f)
+
+
 # ── 완료 오버레이 ────────────────────────────────────────────────
 class DoneOverlay(QWidget):
     def __init__(self, parent):
@@ -342,6 +417,16 @@ class RuntimeWindow(QMainWindow):
         self.status_lbl = self._lbl("● IDLE", 10, color=STATUS_IDLE)
         hdr.addWidget(self.status_lbl)
         R.addLayout(hdr)
+
+        # ── 모드 바 ──
+        mode_card = self._card()
+        ml = QVBoxLayout(mode_card)
+        ml.setContentsMargins(16, 10, 16, 10)
+        ml.setSpacing(6)
+        ml.addWidget(self._sec("MODE"))
+        self.mode_bar = ModeBar()
+        ml.addWidget(self.mode_bar)
+        R.addWidget(mode_card)
 
         # ── 현재 행동 카드 ──
         act_card = self._card()
@@ -478,6 +563,8 @@ class RuntimeWindow(QMainWindow):
             w.setFont(font(max(7, round(pt * scale)), b))
         for panel in (self.cam_vision, self.cam_map):
             panel.update_sec_font(font(max(7, round(9 * scale))))
+        if hasattr(self, 'mode_bar'):
+            self.mode_bar.scale_fonts(scale)
         if hasattr(self, 'overlay'):
             self.overlay.scale_fonts(scale)
             cw = self.centralWidget()
@@ -502,6 +589,9 @@ class RuntimeWindow(QMainWindow):
     def _on_phase(self, text: str):
         self.phase_lbl.setText(text)
         self.log.append(text, ACCENT)
+        mode = detect_mode(text)
+        if mode is not None:
+            self.mode_bar.set_mode(mode)
 
     def _on_color(self, color: str):
         c = COLOR_MAP.get(color, TEXT_SEC)
