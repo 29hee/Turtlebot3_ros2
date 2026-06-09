@@ -23,6 +23,10 @@ from rclpy.node import Node
 CONFLICT = {
     'mapping': ['amcl', 'maze_tour', 'color_confirm'],
     'runtime': ['slam_toolbox', 'maze_explorer', 'color_mapper', 'digit_finalizer'],
+    # finalize(2-pass Phase2): 동결맵+AMCL+Nav2 위에서 digit_finalizer 가 돈다.
+    #   매핑 스택(slam_toolbox/maze_explorer/color_mapper)과 동시구동 금지(map→odom 충돌).
+    #   digit_finalizer 자신은 finalize 가 띄우므로 제외.
+    'finalize': ['slam_toolbox', 'maze_explorer', 'color_mapper'],
 }
 
 

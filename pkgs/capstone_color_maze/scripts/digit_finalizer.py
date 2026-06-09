@@ -70,6 +70,13 @@ class DigitFinalizer(Node):
         self.declare_parameter('align_tol_deg', 6.0)   # 수직정렬 허용오차 [deg]
         self.declare_parameter('align_secs', 6.0)      # 수직정렬 최대 시간 [s]
         self.declare_parameter('save_map', True)       # 끝나면 점유맵 저장
+        # finalize.launch 단독 실행(=Phase1 과 별도 프로세스)이면 /phase1_done 을 기다리지 않는다.
+        #   같은 런치에서 Phase1 과 함께 돌던 구방식 호환을 위해 기본 True.
+        self.declare_parameter('wait_phase1', True)
+        # 실로봇: 시작 시 제자리 회전으로 AMCL 전역추정 수렴(시작위치를 모르므로). 시뮬은 불필요.
+        self.declare_parameter('relocalize', False)
+        self.declare_parameter('reloc_secs', 8.0)      # relocalize 회전 시간 [s]
+        self.declare_parameter('reloc_spin', 0.5)      # relocalize 회전 각속도 [rad/s]
 
         self.landmarks_path = self.get_parameter('landmarks_path').value
         self.map_save = self.get_parameter('map_save').value
@@ -80,6 +87,10 @@ class DigitFinalizer(Node):
         self.align_tol = math.radians(float(self.get_parameter('align_tol_deg').value))
         self.align_secs = float(self.get_parameter('align_secs').value)
         self.save_map = bool(self.get_parameter('save_map').value)
+        self.wait_phase1 = bool(self.get_parameter('wait_phase1').value)
+        self.relocalize = bool(self.get_parameter('relocalize').value)
+        self.reloc_secs = float(self.get_parameter('reloc_secs').value)
+        self.reloc_spin = float(self.get_parameter('reloc_spin').value)
 
         self.scan = None
         self._digit = -1
@@ -219,6 +230,44 @@ class DigitFinalizer(Node):
         self.get_logger().warn('  정면 정렬 시간초과 — 그대로 dwell')
         return False
 
+    def relocalize_spin(self):
+        """시작 시 제자리 회전으로 AMCL 전역 추정을 수렴시킨다(실로봇: 시작위치 모름).
+        동결맵+AMCL 조합이라 한 바퀴 돌면 스캔매칭으로 자기위치가 잡힌다."""
+        self.get_logger().info(f'AMCL 수렴용 제자리 회전 {self.reloc_secs:.0f}s …')
+        end = time.time() + self.reloc_secs
+        t = Twist()
+        t.angular.z = self.reloc_spin
+        while time.time() < end and rclpy.ok():
+            self.cmd_pub.publish(t)
+            rclpy.spin_once(self, timeout_sec=0.05)
+        self.cmd_pub.publish(Twist())
+
+    def persist_digit(self, w, digit):
+        """확정한 숫자를 landmarks YAML 의 해당 색·좌표 엔트리에 '직접' 병합 기록.
+        Phase1 좌표(x,y,nx,ny)는 그대로 두고 digit 필드만 채운다 — color_mapper 덮어쓰기
+        의존을 없애 '방문한 벽은 무조건 숫자가 남도록' 보장."""
+        try:
+            with open(self.landmarks_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            self.get_logger().warn(f'  landmarks 로드 실패(숫자 기록 보류): {e}')
+            return
+        best, bestd = None, float('inf')
+        for e in data.get(w['color'], []):
+            dd = math.hypot(e.get('x', 1e9) - w['x'], e.get('y', 1e9) - w['y'])
+            if dd < bestd:
+                best, bestd = e, dd
+        if best is None or bestd > 0.5:
+            self.get_logger().warn(
+                f'  landmarks 에서 {w["color"]} ({w["x"]:.2f},{w["y"]:.2f}) 매칭 실패 — 숫자 기록 보류')
+            return
+        best['digit'] = int(digit)
+        try:
+            with open(self.landmarks_path, 'w') as f:
+                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        except Exception as e:
+            self.get_logger().warn(f'  landmarks 저장 실패: {e}')
+
     def dwell_read(self):
         """정지 dwell — 정면에서 숫자를 읽는다(color_mapper 가 색+숫자 확정 투표).
         이 동안 본 digit 다수결을 로깅용으로 반환(-1=못읽음)."""
@@ -234,11 +283,17 @@ class DigitFinalizer(Node):
 
     # ── 메인 ──────────────────────────────────────────────────────
     def run(self):
-        # 1) Phase1 완료 대기
-        self.get_logger().info('Phase1(탐사+색좌표) 완료 대기…')
-        while rclpy.ok() and not self._phase1_done:
-            rclpy.spin_once(self, timeout_sec=0.2)
-        self.get_logger().info('=== /phase1_done 수신 → Phase2(정면 방문·숫자 확정) 시작 ===')
+        # 0) 실로봇: AMCL 수렴(시작위치 추정)부터.
+        if self.relocalize:
+            self.relocalize_spin()
+        # 1) Phase1 핸드오프 — 단독 실행(finalize.launch)이면 대기 없이 바로 시작.
+        if self.wait_phase1:
+            self.get_logger().info('Phase1(탐사+색좌표) 완료 대기…')
+            while rclpy.ok() and not self._phase1_done:
+                rclpy.spin_once(self, timeout_sec=0.2)
+            self.get_logger().info('=== /phase1_done 수신 → Phase2(정면 방문·숫자 확정) 시작 ===')
+        else:
+            self.get_logger().info('=== finalize 단독 실행 → Phase2(정면 방문·숫자 확정) 시작 ===')
 
         walls = self.load_walls()
         if not walls:
@@ -261,6 +316,7 @@ class DigitFinalizer(Node):
             d = self.dwell_read()
             if d >= 0:
                 self.get_logger().info(f'{label} → 숫자 {d} 확정(정면)')
+                self.persist_digit(w, d)               # ★ landmarks 에 직접 병합 기록
                 done.append((w['color'], w['id'], d))
             else:
                 self.get_logger().warn(f'{label} → 숫자 못 읽음(정면에서도) — 보류')

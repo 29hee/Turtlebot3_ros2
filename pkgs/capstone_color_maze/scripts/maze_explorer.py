@@ -379,10 +379,6 @@ class MazeExplorer(Node):
 
     # ── 메인 루프 ────────────────────────────────────────────────────
     def on_timer(self):
-        # 2-pass: Phase1 끝났으면 idle(주행 멈춤) — Phase2(Nav2)가 cmd_vel 을 잡는다.
-        if self._phase1_done:
-            self.pub.publish(Twist())
-            return
         # 0) 안전 상한(시간) — 종료는 본래 미방문 소진이지만, 폭주 방지용 상한.
         if self.elapsed(self.start) > self.total:
             if self.two_pass:
@@ -753,16 +749,15 @@ class MazeExplorer(Node):
         return self._color_counts.get(color, 0) >= self.per_color_target
 
     def _finish_phase1(self, reason):
-        """2-pass: Phase1(탐사+색좌표) 완료 — 주행 멈추고 /phase1_done 발행.
-        품질 게이트/재탐사 안 함(숫자는 Phase2 가 정면 방문해 채운다). 노드는 idle 로 살아있어
-        Nav2 가 cmd_vel 을 잡고 digit_finalizer 가 동작하게 둔다(여기서 종료 안 함)."""
-        self.pub.publish(Twist())
+        """2-pass: Phase1(탐사+색좌표) 완료 — /phase1_done 발행 후 '종료'한다.
+        품질게이트/재탐사 안 함(숫자는 별도 finalize.launch 의 Phase2 가 정면 방문해 채운다).
+        종료 → mapping.launch 가 점유맵 저장 + (two_pass) 스택 Shutdown → finalize 로 핸드오프.
+        (color_mapper 는 save_period 마다 색좌표를 디스크에 써두므로 종료 전에 이미 저장돼 있다.)"""
         self._phase1_done = True
         self.publish_phase('PHASE1_DONE')
         self.pub_phase1_done.publish(Bool(data=True))
-        self.get_logger().info(
-            f'=== {reason} → Phase1 완료, /phase1_done 발행 (방문셀 {len(self.visited)}) '
-            f'→ Phase2(정면 방문·숫자 확정) 대기 ===')
+        self.stop_and_quit(
+            f'{reason} → Phase1 완료(방문셀 {len(self.visited)}) → finalize.launch(Phase2) 로 진행')
 
     def complete_or_continue(self, reason):
         """자연 종료 시점의 품질 게이트. 기준 충족이면 종료, 미달이면 재탐사(상한까지),

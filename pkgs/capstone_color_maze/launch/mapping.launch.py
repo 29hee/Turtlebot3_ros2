@@ -45,8 +45,6 @@ def generate_launch_description():
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
     image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
     mode_guard = os.path.join(pkg, 'scripts', 'mode_guard.py')
-    digit_finalizer = os.path.join(pkg, 'scripts', 'digit_finalizer.py')
-    nav2_params = os.path.join(pkg, 'config', 'nav2_maze.yaml')
 
     # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
     #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
@@ -76,7 +74,8 @@ def generate_launch_description():
     # 매핑 종료 품질 게이트: 자연 종료 시 색+숫자 벽이 이 수 미만이면 재탐사(0=끔).
     min_walls = LaunchConfiguration('min_walls', default='1')
     # 매핑 방식: false=단일패스(접근 중 ALIGN 정면정렬 → 인식 잘 됨, 기본/권장)
-    #   true=2패스(Phase1 탐사+색좌표 → Phase2 Nav2 정면방문). 단일패스가 색 인식이 더 좋다.
+    #   true=2패스 Phase1(탐사+색좌표만). 종료 후 finalize.launch(동결맵+AMCL+Nav2)로 Phase2
+    #   (정면 방문·숫자 확정)를 '별도 실행'한다 — SLAM map→odom 점프 없이 안정 주행.
     two_pass = LaunchConfiguration('two_pass', default='false')
     # 벽타기 시 오른쪽 벽 유지거리[m] — 클수록 벽과 멀리 돈다.
     wall_dist = LaunchConfiguration('wall_dist', default='0.6')
@@ -86,7 +85,6 @@ def generate_launch_description():
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
     slam_toolbox = get_package_share_directory('slam_toolbox')
-    nav2_bringup = get_package_share_directory('nav2_bringup')
 
     gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzserver.launch.py')),
@@ -178,25 +176,6 @@ def generate_launch_description():
         cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
-    # ── 2-pass Phase2 용 ── Nav2 navigation(planner/controller/bt) — slam 과 공존(AMCL/map_server
-    #   없음: /map 과 map→odom 은 slam_toolbox 가 제공). two_pass 일 때만.
-    nav2_cond = PythonExpression(["'", explore, "' == 'true' and '", two_pass, "' == 'true'"])
-    nav2_nav = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(nav2_bringup, 'launch', 'navigation_launch.py')),
-        launch_arguments={'use_sim_time': use_sim_time, 'params_file': nav2_params,
-                          'autostart': 'true'}.items(),
-        condition=IfCondition(nav2_cond),
-    )
-    # Phase2 코디네이터 — /phase1_done 받으면 색좌표마다 Nav2 정면 주행 + 수직정렬 + 숫자확정 → 맵저장.
-    finalizer_proc = ExecuteProcess(
-        cmd=['python3', digit_finalizer, '--ros-args',
-             '-p', ['use_sim_time:=', use_sim_time],
-             '-p', ['map_save:='] + map_save,
-             '-p', ['landmarks_path:='] + landmarks],
-        condition=IfCondition(nav2_cond), output='screen',
-    )
-
     # ── 탐사 종료 → 점유격자맵 자동저장 (맵 핸드오프 자동화) ──────────────────
     #   탐사기(maze/scan/wall 중 실행된 것)가 끝나면 map_saver_cli 로 /map 을 저장한다.
     #   '미방문 소진/시간상한'으로 정상 종료될 때 저장됨. (수동 map_saver 깜빡 방지.)
@@ -217,12 +196,20 @@ def generate_launch_description():
     guard_handler = RegisterEventHandler(
         OnProcessExit(target_action=guard_proc, on_exit=_guard_exit))
 
+    maze_saver = _map_saver()        # maze 종료 시 점유맵 저장(아래 Shutdown 체인을 위해 핸들 보관)
     save_on_maze = RegisterEventHandler(
-        OnProcessExit(target_action=maze_proc, on_exit=[_map_saver()]))
+        OnProcessExit(target_action=maze_proc, on_exit=[maze_saver]))
     save_on_scan = RegisterEventHandler(
         OnProcessExit(target_action=scan_proc, on_exit=[_map_saver()]))
     save_on_wall = RegisterEventHandler(
         OnProcessExit(target_action=wf_proc, on_exit=[_map_saver()]))
+    # 2-pass(two_pass:=true): Phase1 종료 → 점유맵 저장 '완료 후' 매핑 스택을 깨끗이 Shutdown.
+    #   (color_mapper 는 save_period 마다 색좌표를 이미 디스크에 써둠.) → finalize.launch 로 핸드오프.
+    #   단일패스(two_pass:=false)면 IfCondition 으로 Shutdown 미발생 → 기존 동작(스택 유지) 유지.
+    shutdown_after_phase1 = RegisterEventHandler(
+        OnProcessExit(target_action=maze_saver,
+                      on_exit=[Shutdown(reason='2-pass Phase1 완료 → finalize.launch(Phase2) 로 진행',
+                                        condition=IfCondition(two_pass))]))
 
     return LaunchDescription([
         # 자식 프로세스(gzserver/스폰)도 카메라 모델을 상속받도록 런치 환경에 고정
@@ -248,12 +235,11 @@ def generate_launch_description():
         DeclareLaunchArgument('min_walls', default_value='1',
                               description='매핑 종료 품질 게이트: 색+숫자 벽 최소수(미달이면 재탐사, 0=끔)'),
         DeclareLaunchArgument('two_pass', default_value='false',
-                              description='false=단일패스(ALIGN 정면정렬, 기본/권장) | true=2패스(Nav2 Phase2)'),
+                              description='false=단일패스(ALIGN 정면정렬, 기본/권장) | true=2패스 Phase1(탐사+색좌표만, 종료후 finalize.launch)'),
         DeclareLaunchArgument('wall_dist', default_value='0.6',
                               description='벽타기 오른쪽 벽 유지거리[m] (클수록 벽과 멀리)'),
         guard_proc, guard_handler,
         gzserver, gzclient, rsp, spawn, slam,
         upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
-        nav2_nav, finalizer_proc,
-        save_on_maze, save_on_scan, save_on_wall,
+        save_on_maze, save_on_scan, save_on_wall, shutdown_after_phase1,
     ])
