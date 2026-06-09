@@ -33,11 +33,11 @@ import tf2_ros
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion, Twist
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, Int32
+from std_msgs.msg import Bool, Int32, Float32MultiArray
 from nav2_msgs.action import NavigateToPose
 
 from maze_common import (
-    VALID_COLORS, resolve_target_walls, approach_pose,
+    VALID_COLORS, resolve_target_walls, approach_pose, id_to_color,
 )
 
 KOR = {'RED': '빨강', 'GREEN': '초록', 'BLUE': '파랑'}
@@ -70,6 +70,14 @@ class DigitFinalizer(Node):
         self.declare_parameter('align_tol_deg', 6.0)   # 수직정렬 허용오차 [deg]
         self.declare_parameter('align_secs', 6.0)      # 수직정렬 최대 시간 [s]
         self.declare_parameter('save_map', True)       # 끝나면 점유맵 저장
+        self.declare_parameter('nav_timeout', 120.0)   # Nav2 결과 대기 상한[s] (무한대기 방지)
+        # ★ Q1: 도착 후 '기대 색이 충분히/중앙에 보이는지' 확인(맞는 판 보고 있는지).
+        self.declare_parameter('cx_fov_deg', 60.0)     # cx → 방위각 환산
+        self.declare_parameter('confirm_cov', 0.04)    # 기대 색 점유율 ≥ 이 값이면 '그 판 맞음'
+        self.declare_parameter('face_tol', 0.12)       # 색 중앙 허용오차(|cx|)
+        self.declare_parameter('perp_tol_deg', 12.0)   # 수직 허용오차[deg] — 이 이하라야 센터보정 신뢰
+        # ★ Q2: OCR 거리 — 못 읽으면 이 거리들을 차례로 시도(정면거리 맞춰가며).
+        self.declare_parameter('ocr_dists', [0.45, 0.35, 0.55])
         # finalize.launch 단독 실행(=Phase1 과 별도 프로세스)이면 /phase1_done 을 기다리지 않는다.
         #   같은 런치에서 Phase1 과 함께 돌던 구방식 호환을 위해 기본 True.
         self.declare_parameter('wait_phase1', True)
@@ -87,6 +95,12 @@ class DigitFinalizer(Node):
         self.align_tol = math.radians(float(self.get_parameter('align_tol_deg').value))
         self.align_secs = float(self.get_parameter('align_secs').value)
         self.save_map = bool(self.get_parameter('save_map').value)
+        self.nav_timeout = float(self.get_parameter('nav_timeout').value)
+        self.cx_fov_deg = float(self.get_parameter('cx_fov_deg').value)
+        self.confirm_cov = float(self.get_parameter('confirm_cov').value)
+        self.face_tol = float(self.get_parameter('face_tol').value)
+        self.perp_tol = math.radians(float(self.get_parameter('perp_tol_deg').value))
+        self.ocr_dists = list(self.get_parameter('ocr_dists').value)
         self.wait_phase1 = bool(self.get_parameter('wait_phase1').value)
         self.relocalize = bool(self.get_parameter('relocalize').value)
         self.reloc_secs = float(self.get_parameter('reloc_secs').value)
@@ -95,6 +109,9 @@ class DigitFinalizer(Node):
         self.scan = None
         self._digit = -1
         self._phase1_done = False
+        self._sig_color = 'NONE'   # /color_signal 최신 우세색
+        self._sig_cx = 0.0
+        self._sig_cov = 0.0
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -102,6 +119,7 @@ class DigitFinalizer(Node):
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         self.create_subscription(LaserScan, 'scan', self._on_scan, qos_profile_sensor_data)
         self.create_subscription(Int32, '/detected_digit', self._on_digit, 10)
+        self.create_subscription(Float32MultiArray, '/color_signal', self._on_signal, 10)
         _latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/phase1_done', self._on_phase1, _latched)
         self.pub_done = self.create_publisher(Bool, '/phase2_done', _latched)
@@ -111,6 +129,13 @@ class DigitFinalizer(Node):
     # ── 콜백 ──────────────────────────────────────────────────────
     def _on_scan(self, msg):
         self.scan = msg
+
+    def _on_signal(self, msg):
+        d = msg.data
+        if len(d) >= 3:
+            self._sig_color = id_to_color(int(d[0]))
+            self._sig_cx = float(d[1])
+            self._sig_cov = float(d[2])
 
     def _on_digit(self, msg):
         self._digit = int(msg.data)
@@ -183,14 +208,23 @@ class DigitFinalizer(Node):
         goal.pose = p
         self.get_logger().info(f'[{label}] 정면 접근 주행 → ({x:.2f},{y:.2f},{math.degrees(yaw):.0f}°)')
         fut = self.nav.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, fut)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
         handle = fut.result()
         if handle is None or not handle.accepted:
-            self.get_logger().error(f'[{label}] 목표 거부')
+            self.get_logger().error(f'[{label}] 목표 거부/응답없음')
             return False
         rfut = handle.get_result_async()
-        rclpy.spin_until_future_complete(self, rfut)
-        ok = rfut.result().status == GoalStatus.STATUS_SUCCEEDED
+        # ★ 타임아웃 — Nav2 가 결과를 안 주면 무한 대기(행) 방지: 취소하고 실패 처리.
+        rclpy.spin_until_future_complete(self, rfut, timeout_sec=self.nav_timeout)
+        res = rfut.result()
+        if res is None:
+            self.get_logger().error(f'[{label}] Nav2 결과 {self.nav_timeout:.0f}s 타임아웃 — 취소·건너뜀')
+            try:
+                handle.cancel_goal_async()
+            except Exception:
+                pass
+            return False
+        ok = res.status == GoalStatus.STATUS_SUCCEEDED
         self.get_logger().info(f'[{label}] {"도착" if ok else "주행 실패"}')
         return ok
 
@@ -242,10 +276,9 @@ class DigitFinalizer(Node):
             rclpy.spin_once(self, timeout_sec=0.05)
         self.cmd_pub.publish(Twist())
 
-    def persist_digit(self, w, digit):
+    def persist_digit(self, w, digit, obs=None):
         """확정한 숫자를 landmarks YAML 의 해당 색·좌표 엔트리에 '직접' 병합 기록.
-        Phase1 좌표(x,y,nx,ny)는 그대로 두고 digit 필드만 채운다 — color_mapper 덮어쓰기
-        의존을 없애 '방문한 벽은 무조건 숫자가 남도록' 보장."""
+        obs(=관측된 패널 위치 x,y,nx,ny)가 주어지면(수직 관측) 좌표도 센터 보정한다."""
         try:
             with open(self.landmarks_path) as f:
                 data = yaml.safe_load(f) or {}
@@ -262,24 +295,157 @@ class DigitFinalizer(Node):
                 f'  landmarks 에서 {w["color"]} ({w["x"]:.2f},{w["y"]:.2f}) 매칭 실패 — 숫자 기록 보류')
             return
         best['digit'] = int(digit)
+        # ★ 수직 관측이면 좌표·법선을 그 관측으로 센터 보정(맵에 반영). 매칭 벽 근처일 때만.
+        if obs is not None and math.hypot(obs[0] - best['x'], obs[1] - best['y']) <= 0.5:
+            best['x'], best['y'] = round(obs[0], 3), round(obs[1], 3)
+            best['nx'], best['ny'] = round(obs[2], 3), round(obs[3], 3)
+            self.get_logger().info(f'  좌표 센터 보정 → ({best["x"]:.2f},{best["y"]:.2f})')
         try:
             with open(self.landmarks_path, 'w') as f:
                 yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
         except Exception as e:
             self.get_logger().warn(f'  landmarks 저장 실패: {e}')
 
-    def dwell_read(self):
-        """정지 dwell — 정면에서 숫자를 읽는다(color_mapper 가 색+숫자 확정 투표).
-        이 동안 본 digit 다수결을 로깅용으로 반환(-1=못읽음)."""
+    def front_range(self):
+        """전방 ±8° 라이다 거리(중앙값). 없으면 inf."""
+        s = self.scan
+        if s is None:
+            return float('inf')
+        n = len(s.ranges)
+        vals = []
+        a = -8
+        while a <= 8:
+            idx = int(round((math.radians(a) - s.angle_min) / s.angle_increment)) % n
+            r = s.ranges[idx]
+            if r and math.isfinite(r) and s.range_min < r < s.range_max:
+                vals.append(r)
+            a += 1
+        return sorted(vals)[len(vals) // 2] if vals else float('inf')
+
+    def _range_at(self, bearing_rad):
+        """라이다 bearing_rad 방향(±4°) 거리(중앙값). 없으면 None."""
+        s = self.scan
+        if s is None or len(s.ranges) == 0:
+            return None
+        n = len(s.ranges)
+        win = max(1, int(math.radians(4) / s.angle_increment))
+        i0 = int(round((bearing_rad - s.angle_min) / s.angle_increment)) % n
+        vals = []
+        for k in range(-win, win + 1):
+            r = s.ranges[(i0 + k) % n]
+            if math.isfinite(r) and s.range_min <= r <= s.range_max:
+                vals.append(r)
+        return sorted(vals)[len(vals) // 2] if vals else None
+
+    def observed_panel(self):
+        """★ '지금 보이는 색의 진짜 위치(map)+법선' = 로봇 + cx방위 + 그 방향 라이다.
+        숫자를 읽은 순간의 cx 로 패널 중심을 센터 보정한다. 실패 시 None."""
+        if self._sig_color == 'NONE' or self._sig_cov < self.confirm_cov:
+            return None
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.map_frame, self.base_frame, rclpy.time.Time())
+        except (tf2_ros.LookupException, tf2_ros.ExtrapolationException,
+                tf2_ros.ConnectivityException):
+            return None
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
+                         1 - 2 * (q.y * q.y + q.z * q.z))
+        bearing = math.radians(-self._sig_cx * self.cx_fov_deg)
+        rng = self._range_at(bearing)
+        if rng is None:
+            return None
+        ang = yaw + bearing
+        px, py = t.x + rng * math.cos(ang), t.y + rng * math.sin(ang)
+        return (px, py, -math.cos(ang), -math.sin(ang))   # x,y, nx,ny(벽→로봇)
+
+    def wall_skew(self):
+        """★ 전방 벽을 직선적합 → 벽 법선과 로봇 정면 사이 각[rad]. 0=완전 수직.
+        cx 가 중앙이어도 이 값이 크면 '비스듬히 본 것'. 못 구하면 None."""
+        s = self.scan
+        if s is None:
+            return None
+        n = len(s.ranges)
+        xs, ys = [], []
+        a = -30
+        while a <= 30:
+            idx = int(round((math.radians(a) - s.angle_min) / s.angle_increment)) % n
+            r = s.ranges[idx]
+            if r and math.isfinite(r) and s.range_min < r < s.range_max:
+                xs.append(r * math.cos(math.radians(a)))
+                ys.append(r * math.sin(math.radians(a)))
+            a += 2
+        if len(xs) < 6:
+            return None
+        mx = sum(xs) / len(xs); my = sum(ys) / len(ys)
+        sxx = sum((x - mx) ** 2 for x in xs)
+        syy = sum((y - my) ** 2 for y in ys)
+        sxy = sum((xs[i] - mx) * (ys[i] - my) for i in range(len(xs)))
+        theta = 0.5 * math.atan2(2 * sxy, sxx - syy)   # 벽 방향(robot frame)
+        nx, ny = -math.sin(theta), math.cos(theta)     # 법선
+        if nx > 0:
+            nx, ny = -nx, -ny                          # 로봇쪽(-x)
+        return abs(math.atan2(ny, -nx))                # (-1,0)=완전수직 기준 각
+
+    def face_color(self, color):
+        """[Q1] 기대 색을 화면 중앙에 오게 회전 → 그 패널을 정면으로 본다(=맞는 판 확인).
+        align_secs 안에 기대 색이 중앙(±face_tol)+충분점유(confirm_cov)면 True. 아예 못 보면 False."""
+        end = time.time() + self.align_secs
+        seen = False
+        while time.time() < end and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.05)
+            if self._sig_color == color and self._sig_cov >= self.confirm_cov:
+                seen = True
+                if abs(self._sig_cx) <= self.face_tol:
+                    self.cmd_pub.publish(Twist())
+                    self.get_logger().info(
+                        f'  {color} 정면 확인(cx={self._sig_cx:+.2f}, cov={self._sig_cov:.2f})')
+                    return True
+                t = Twist(); t.angular.z = max(-0.4, min(0.4, -0.8 * self._sig_cx))
+                self.cmd_pub.publish(t)
+            else:
+                t = Twist(); t.angular.z = 0.25     # 기대 색 안 보임 → 천천히 좌우 탐색
+                self.cmd_pub.publish(t)
+        self.cmd_pub.publish(Twist())
+        return seen
+
+    def set_distance(self, target, secs=3.0):
+        """[Q2] 정면 라이다 거리를 target[m]에 맞춘다(전/후진) — OCR 적정 거리 조정."""
+        end = time.time() + secs
+        while time.time() < end and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.05)
+            err = self.front_range() - target
+            if abs(err) <= 0.04:
+                self.cmd_pub.publish(Twist()); return
+            t = Twist(); t.linear.x = max(-0.06, min(0.06, 0.5 * err))
+            self.cmd_pub.publish(t)
+        self.cmd_pub.publish(Twist())
+
+    def _read_once(self, secs):
+        """secs 동안 정지하며 digit 다수결. -1=못읽음."""
         self._digit = -1
         seen = []
-        end = time.time() + self.dwell_secs
+        end = time.time() + secs
         while time.time() < end and rclpy.ok():
             self.cmd_pub.publish(Twist())
             rclpy.spin_once(self, timeout_sec=0.1)
             if self._digit >= 0:
                 seen.append(self._digit)
         return Counter(seen).most_common(1)[0][0] if seen else -1
+
+    def dwell_read(self, color):
+        """[Q2] OCR 적정 거리를 차례로 시도하며 숫자를 읽는다(못 읽으면 거리 바꿔 재시도).
+        각 거리에서 기대 색을 다시 중앙에 두고(face) dwell. 성공한 숫자 반환, 다 실패면 -1."""
+        for dist in self.ocr_dists:
+            self.set_distance(dist)
+            self.face_color(color)              # 거리 바꾼 뒤 다시 정면 중앙
+            d = self._read_once(self.dwell_secs)
+            if d >= 0:
+                self.get_logger().info(f'  OCR 성공 @ ~{dist:.2f}m → 숫자 {d}')
+                return d
+            self.get_logger().info(f'  OCR 실패 @ ~{dist:.2f}m — 거리 바꿔 재시도')
+        return -1
 
     # ── 메인 ──────────────────────────────────────────────────────
     def run(self):
@@ -312,14 +478,26 @@ class DigitFinalizer(Node):
             if not self.nav_to(ax, ay, yaw, label):
                 self.get_logger().warn(f'{label} 접근 실패 — 건너뜀')
                 continue
-            self.align_frontal()                       # ★ 대각이 아닌 정면으로
-            d = self.dwell_read()
+            self.align_frontal()                       # 라이다로 벽에 거친 수직정렬
+            # ★ Q1: 기대 색을 정면 중앙에 두고 '맞는 판 보고 있는지' 확인. 못 보면 엉뚱한 위치.
+            if not self.face_color(w['color']):
+                self.get_logger().warn(f'{label} → {kor} 색을 못 봄(좌표 어긋남/놓침) — 건너뜀')
+                continue
+            # ★ Q2: OCR 적정 거리 차례로 시도하며 숫자 읽기.
+            d = self.dwell_read(w['color'])
             if d >= 0:
-                self.get_logger().info(f'{label} → 숫자 {d} 확정(정면)')
-                self.persist_digit(w, d)               # ★ landmarks 에 직접 병합 기록
+                # ★ 수직도 측정 — cx 중앙이어도 비스듬히 봤으면 좌표 센터보정은 신뢰 안 함.
+                skew = self.wall_skew()
+                perp = skew is not None and skew <= self.perp_tol
+                obs = self.observed_panel() if perp else None
+                tag = (f'수직 {math.degrees(skew):.0f}°→센터보정' if perp
+                       else (f'비스듬 {math.degrees(skew):.0f}°→좌표유지' if skew is not None
+                             else '수직측정실패→좌표유지'))
+                self.get_logger().info(f'{label} → 숫자 {d} 확정(정면, {tag})')
+                self.persist_digit(w, d, obs)          # 수직일 때만 좌표 센터보정
                 done.append((w['color'], w['id'], d))
             else:
-                self.get_logger().warn(f'{label} → 숫자 못 읽음(정면에서도) — 보류')
+                self.get_logger().warn(f'{label} → 숫자 못 읽음(거리 조정해도) — 보류')
 
         # 2) 맵 확정: 점유격자맵 저장
         if self.save_map:

@@ -45,6 +45,8 @@ def generate_launch_description():
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
     image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
     mode_guard = os.path.join(pkg, 'scripts', 'mode_guard.py')
+    digit_finalizer = os.path.join(pkg, 'scripts', 'digit_finalizer.py')   # 2-pass Phase2(인라인)
+    nav2_params = os.path.join(pkg, 'config', 'nav2_maze.yaml')
 
     # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
     #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
@@ -85,6 +87,7 @@ def generate_launch_description():
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
     slam_toolbox = get_package_share_directory('slam_toolbox')
+    nav2_bringup = get_package_share_directory('nav2_bringup')
 
     gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzserver.launch.py')),
@@ -179,6 +182,28 @@ def generate_launch_description():
         cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(digit_cond), output='screen',
     )
+    # ── 2-pass Phase2 (★인라인 — 같은 런치에서 이어서) ─────────────────────────────
+    #   별도 런치+AMCL 로 시작하면 로봇 실제 위치(Phase1 끝지점)와 추정이 어긋난다.
+    #   → slam 을 끄지 않고 그대로 두고(위치 연속 추적), Nav2 navigation 이 slam 의 /map·map→odom 을
+    #     써서 정면 방문한다. AMCL/맵동결/relocalize 불필요 = 위치가 끊김없이 유지된다.
+    p2_cond = PythonExpression(["'", explore, "' == 'true' and '", two_pass, "' == 'true'"])
+    nav2_nav = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(nav2_bringup, 'launch', 'navigation_launch.py')),
+        launch_arguments={'use_sim_time': use_sim_time, 'params_file': nav2_params,
+                          'autostart': 'true'}.items(),
+        condition=IfCondition(p2_cond),
+    )
+    # digit_finalizer — /phase1_done 받으면(wait_phase1=true) 위치 유지된 채 정면 방문·숫자 확정.
+    #   relocalize:=false (slam 이 이미 위치를 앎). 끝나면 점유맵 저장.
+    finalizer_proc = ExecuteProcess(
+        cmd=['python3', digit_finalizer, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time],
+             '-p', 'wait_phase1:=true', '-p', 'relocalize:=false', '-p', 'save_map:=true',
+             '-p', ['map_save:='] + map_save,
+             '-p', ['landmarks_path:='] + landmarks],
+        condition=IfCondition(p2_cond), output='screen',
+    )
     # ── 탐사 종료 → 점유격자맵 자동저장 (맵 핸드오프 자동화) ──────────────────
     #   탐사기(maze/scan/wall 중 실행된 것)가 끝나면 map_saver_cli 로 /map 을 저장한다.
     #   '미방문 소진/시간상한'으로 정상 종료될 때 저장됨. (수동 map_saver 깜빡 방지.)
@@ -206,13 +231,12 @@ def generate_launch_description():
         OnProcessExit(target_action=scan_proc, on_exit=[_map_saver()]))
     save_on_wall = RegisterEventHandler(
         OnProcessExit(target_action=wf_proc, on_exit=[_map_saver()]))
-    # 2-pass(two_pass:=true): Phase1 종료 → 점유맵 저장 '완료 후' 매핑 스택을 깨끗이 Shutdown.
-    #   (color_mapper 는 save_period 마다 색좌표를 이미 디스크에 써둠.) → finalize.launch 로 핸드오프.
-    #   단일패스(two_pass:=false)면 IfCondition 으로 Shutdown 미발생 → 기존 동작(스택 유지) 유지.
-    shutdown_after_phase1 = RegisterEventHandler(
-        OnProcessExit(target_action=maze_saver,
-                      on_exit=[Shutdown(reason='2-pass Phase1 완료 → finalize.launch(Phase2) 로 진행',
-                                        condition=IfCondition(two_pass))]))
+    # 2-pass(인라인): Phase2(digit_finalizer)가 끝나면(점유맵 저장 완료) 전체 스택 Shutdown.
+    #   Phase1→Phase2 가 한 런치에서 slam 위치 유지된 채 이어진다(별도 실행/위치 어긋남 없음).
+    #   단일패스(two_pass:=false)면 finalizer 미실행 → 이 핸들러는 발화 안 함(기존 동작 유지).
+    shutdown_after_phase2 = RegisterEventHandler(
+        OnProcessExit(target_action=finalizer_proc,
+                      on_exit=[Shutdown(reason='2-pass 완료(Phase1+Phase2 인라인) → 종료')]))
 
     return LaunchDescription([
         # 자식 프로세스(gzserver/스폰)도 카메라 모델을 상속받도록 런치 환경에 고정
@@ -244,5 +268,6 @@ def generate_launch_description():
         guard_proc, guard_handler,
         gzserver, gzclient, rsp, spawn, slam,
         upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
-        save_on_maze, save_on_scan, save_on_wall, shutdown_after_phase1,
+        nav2_nav, finalizer_proc,
+        save_on_maze, save_on_scan, save_on_wall, shutdown_after_phase2,
     ])

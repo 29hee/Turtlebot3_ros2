@@ -39,12 +39,12 @@ import numpy as np
 import yaml
 
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Int32, String
+from std_msgs.msg import Int32, Float32MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
 
 import tf2_ros
 
-from maze_common import VALID_COLORS, normalize_color
+from maze_common import VALID_COLORS, id_to_color
 
 
 def default_landmarks_path():
@@ -82,6 +82,10 @@ class ColorMapper(Node):
         self.declare_parameter('min_votes', 5)         # 이 득표 이상인 칸만 채택
         self.declare_parameter('save_path', default_landmarks_path())
         self.declare_parameter('save_period', 3.0)
+        # ★ 색을 '정면 거리'가 아니라 '색이 보이는 방위(cx)+그 방향 라이다 거리'로 투영한다.
+        #   → 옆으로 흘끗 본 색도 그 패널의 '진짜 위치'에 기록(정면 고정 카메라 한계 해결).
+        self.declare_parameter('cx_fov_deg', 60.0)     # cx(-1~1) → 방위각 환산 스케일
+        self.declare_parameter('min_cov', 0.02)        # 이 점유율 미만이면 너무 흐릿 → 무시
         # 2-pass 매핑: Phase1 은 '색 좌표만' 저장(require_digit=false), Phase2 가 정면 방문해
         #   숫자를 채운다. require_digit=true(기본)면 색+숫자 둘 다 있는 칸만 저장(단일패스 호환).
         self.declare_parameter('require_digit', True)
@@ -95,6 +99,8 @@ class ColorMapper(Node):
         self.save_path = self.get_parameter('save_path').value
         self.save_period = float(self.get_parameter('save_period').value)
         self.require_digit = bool(self.get_parameter('require_digit').value)
+        self.cx_fov_deg = float(self.get_parameter('cx_fov_deg').value)
+        self.min_cov = float(self.get_parameter('min_cov').value)
         self._dropped_nodigit = 0   # 숫자 미상으로 보류된 칸 수(저장 시 경고용)
 
         self.scan = None
@@ -109,7 +115,7 @@ class ColorMapper(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.create_subscription(LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
-        self.create_subscription(String, '/detected_color', self.color_cb, 10)
+        self.create_subscription(Float32MultiArray, '/color_signal', self.on_signal, 10)
         self.create_subscription(Int32, '/detected_digit', self.digit_cb, 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/color_landmarks', 10)
         self.create_timer(self.save_period, self.save_cb)
@@ -141,14 +147,37 @@ class ColorMapper(Node):
                 vals.append(r)
         return float(np.median(vals)) if vals else None
 
-    def color_cb(self, msg):
-        """vision_node 우세색 수신 → 근접·TF 유효 시 격자 투표."""
-        color = normalize_color(msg.data)
-        if color is None:                 # 'NONE' 등
+    def range_at(self, bearing_rad):
+        """라이다에서 방위각 bearing_rad 방향(±4°)의 거리(중앙값). 없으면 None."""
+        s = self.scan
+        if s is None or len(s.ranges) == 0:
+            return None
+        n = len(s.ranges)
+        win = max(1, int(math.radians(4) / s.angle_increment))
+        i0 = int(round((bearing_rad - s.angle_min) / s.angle_increment)) % n
+        vals = []
+        for k in range(-win, win + 1):
+            r = s.ranges[(i0 + k) % n]
+            if math.isfinite(r) and s.range_min <= r <= s.range_max:
+                vals.append(r)
+        return float(np.median(vals)) if vals else None
+
+    def on_signal(self, msg):
+        """vision_node /color_signal [color_id, cx, coverage] 수신 → '색 방위(cx)' 방향으로 투영.
+        옆으로 흘끗 본 색도 그 방위+라이다 거리로 패널의 '진짜 위치'에 격자투표(정면거리 투영 한계 해결)."""
+        d = msg.data
+        if len(d) < 3:
             return
-        d = self.front_range()
-        if d is None or not (self.min_range <= d <= self.max_range):
-            return                        # 근접 게이트: 멀면 기록 안 함
+        color = id_to_color(int(d[0]))
+        if color == 'NONE':
+            return
+        cx, cov = float(d[1]), float(d[2])
+        if cov < self.min_cov:
+            return                        # 너무 흐릿 → 무시
+        bearing = math.radians(-cx * self.cx_fov_deg)   # cx>0=오른쪽=음의 각(로봇 우측)
+        rng = self.range_at(bearing)
+        if rng is None or not (self.min_range <= rng <= self.max_range):
+            return                        # 그 방향에 가까운 벽 없음 → 기록 안 함
         try:
             tf = self.tf_buffer.lookup_transform(
                 self.map_frame, self.base_frame, rclpy.time.Time())
@@ -158,9 +187,10 @@ class ColorMapper(Node):
         t = tf.transform.translation
         q = (tf.transform.rotation.x, tf.transform.rotation.y,
              tf.transform.rotation.z, tf.transform.rotation.w)
-        rx, ry, _ = quat_rotate(q, (d, 0.0, 0.0))
-        # 시점방향(벽→로봇) 단위벡터 = -(전방벡터)/d. Phase2 가 이 쪽에서 정면 접근.
-        nx, ny = (-rx / d, -ry / d) if d > 1e-6 else (0.0, 0.0)
+        # 색 방향 벡터(로봇프레임) = rng·(cos b, sin b) → map 프레임 회전
+        rx, ry, _ = quat_rotate(q, (rng * math.cos(bearing), rng * math.sin(bearing), 0.0))
+        mag = math.hypot(rx, ry)
+        nx, ny = (-rx / mag, -ry / mag) if mag > 1e-6 else (0.0, 0.0)   # 시점방향(벽→로봇)
         self.vote(color, t.x + rx, t.y + ry, nx, ny)
 
     # ── 격자 투표 ─────────────────────────────────────────────────

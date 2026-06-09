@@ -76,6 +76,7 @@ class MazeTour(Node):
         self.declare_parameter('oneshot', False)
         self.declare_parameter('landmarks_path', default_landmarks_path())
         self.declare_parameter('standoff', 0.45)        # 벽 앞 정지 거리 [m]
+        self.declare_parameter('nav_timeout', 120.0)    # Nav2 결과 대기 상한[s] (무한대기 방지)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('confirm_window', 4.0)   # 도착 후 확인 관측 시간 [s]
@@ -102,6 +103,7 @@ class MazeTour(Node):
         self.oneshot = bool(self.get_parameter('oneshot').value)
         self.landmarks_path = self.get_parameter('landmarks_path').value
         self.standoff = float(self.get_parameter('standoff').value)
+        self.nav_timeout = float(self.get_parameter('nav_timeout').value)
         self.map_frame = self.get_parameter('map_frame').value
         self.base_frame = self.get_parameter('base_frame').value
         self.confirm_window = float(self.get_parameter('confirm_window').value)
@@ -226,16 +228,24 @@ class MazeTour(Node):
         self.get_logger().info(f'[{label}] 주행 → ({x:.2f},{y:.2f},{math.degrees(yaw):.0f}°)')
 
         send_future = self.nav_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, send_future)
+        rclpy.spin_until_future_complete(self, send_future, timeout_sec=10.0)
         handle = send_future.result()
         if handle is None or not handle.accepted:
-            self.get_logger().error(f'[{label}] 목표 거부됨')
+            self.get_logger().error(f'[{label}] 목표 거부/응답없음')
             return False
         result_future = handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
-        status = result_future.result().status
-        ok = status == GoalStatus.STATUS_SUCCEEDED
-        self.get_logger().info(f'[{label}] {"도착" if ok else "실패(status=%d)" % status}')
+        # ★ 타임아웃 — Nav2 결과 무한 대기(행) 방지: 취소하고 실패 처리.
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=self.nav_timeout)
+        res = result_future.result()
+        if res is None:
+            self.get_logger().error(f'[{label}] Nav2 결과 {self.nav_timeout:.0f}s 타임아웃 — 취소·실패')
+            try:
+                handle.cancel_goal_async()
+            except Exception:
+                pass
+            return False
+        ok = res.status == GoalStatus.STATUS_SUCCEEDED
+        self.get_logger().info(f'[{label}] {"도착" if ok else "실패(status=%d)" % res.status}')
         return ok
 
     def await_confirmation(self):

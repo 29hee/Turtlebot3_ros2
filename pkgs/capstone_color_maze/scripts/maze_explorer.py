@@ -219,6 +219,7 @@ class MazeExplorer(Node):
         self._pose_lost_since = None   # TF 위치 끊김 시작 시각
         self._last_sensor_warn = 0.0
         self._last_pose_warn = 0.0
+        self._need_reset = False       # 지속 TF 끊김 → 복구 시 탐사 재초기화 플래그
         self.get_logger().info(
             f"maze_explorer 시작 — 색-반응 매핑, total(상한)={self.total:.0f}s, "
             f"standoff={self.standoff}m, stuck<{self.stuck_dist}m/{self.stuck_win:.0f}s")
@@ -420,31 +421,35 @@ class MazeExplorer(Node):
 
         pose = self.get_pose()
 
-        # 1) TF 위치 끊김 처리.
+        # 1) TF 위치 끊김 처리. ★ TF(map→base_link) 없으면 '무조건 정지' — 장님 회전/주행 금지.
+        #    (원인 보통: slam map→odom 미발행=Pi↔PC 클럭 어긋남으로 스캔 드롭, 또는 odom 끊김.)
         if pose is None:
             if self._pose_lost_since is None:
                 self._pose_lost_since = self.now()
             lost_for = self.elapsed(self._pose_lost_since)
+            self.pub.publish(Twist())          # 정지 — 위치 모르고 돌면 위험·무의미
+            now_s = self.elapsed(self.start)
+            if lost_for > 3.0 and now_s - self._last_pose_warn > 5.0:
+                self._last_pose_warn = now_s
+                self.get_logger().error(
+                    f'map→base_link {lost_for:.0f}s 없음 — slam map→odom 미발행(Pi↔PC 클럭 어긋남→'
+                    f'스캔 드롭?) 또는 odom 끊김. 정지 대기. (chronyc makestep / slam·배터리 확인)')
             if lost_for > self.pose_lost_limit:
-                # 장기 끊김 = 일시적 SLAM 흔들림이 아니라 odom/TF 사망(예: turtlebot3_node
-                #   배터리로 죽음). '장님 주행' 금지 — 정지하고 큰 소리로 알린다.
-                self.pub.publish(Twist())
-                now_s = self.elapsed(self.start)
-                if now_s - self._last_pose_warn > 5.0:
-                    self._last_pose_warn = now_s
-                    self.get_logger().error(
-                        f'위치(TF map→base_link) {lost_for:.0f}s 끊김 — odom/SLAM 사망 의심 '
-                        f'(turtlebot3_node·배터리 확인). 정지.')
-                return
-            # 단기 끊김 — '무한 제자리 회전 금지'(D). 짧게만 돌고, 그 뒤엔 느린 전진으로 칸 변경.
-            c = Twist()
-            if lost_for < self.tf_lost_spin:
-                c.angular.z = self.spin_speed
-            else:
-                c.linear.x = 0.08      # 칸을 바꿔 SLAM 재수렴 유도(제자리 회전은 정보 0)
-            self.pub.publish(c)
+                self._need_reset = True        # 지속 끊김 → 복구되면 재초기화
             return
-        self._pose_lost_since = None   # 위치 정상 → 끊김 타이머 리셋
+        # 위치 정상 — 지속 끊김 후 복구면 탐사 재초기화하고 재개(누적 색 캡처는 보존).
+        if self._pose_lost_since is not None:
+            lost_was = self.elapsed(self._pose_lost_since)
+            self._pose_lost_since = None
+            if self._need_reset:
+                self._need_reset = False
+                self.get_logger().info(f'TF 복구(끊김 {lost_was:.0f}s) → 탐사 재초기화 후 재개')
+                self.phase = 'PERIMETER'
+                self.interrupt = None
+                self.left_start = False
+                self.start_cell = None
+                self.wd_pose = None
+                self.phase_start = self.now()
 
         # 방문 격자 기록
         self.visited.add(self.cell(pose[0], pose[1]))
