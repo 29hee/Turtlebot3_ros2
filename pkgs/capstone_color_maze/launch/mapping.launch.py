@@ -45,6 +45,8 @@ def generate_launch_description():
     digit_recognizer = os.path.join(pkg, 'scripts', 'digit_recognizer.py')
     image_upright = os.path.join(pkg, 'scripts', 'image_upright.py')
     mode_guard = os.path.join(pkg, 'scripts', 'mode_guard.py')
+    digit_finalizer = os.path.join(pkg, 'scripts', 'digit_finalizer.py')
+    nav2_params = os.path.join(pkg, 'config', 'nav2_maze.yaml')
 
     # 시뮬 여부. sim:=false 면 gazebo/spawn/robot_state_publisher 를 안 띄운다(실로봇용).
     #   실로봇은 로봇 bringup(Pi) + image_upright(PC) 가 /scan·/camera/image_raw·TF 를 이미 제공한다.
@@ -65,15 +67,26 @@ def generate_launch_description():
     gui = LaunchConfiguration('gui', default='false')
     # 종료는 본래 '미방문 소진'이지만 폭주 방지 시간 상한.
     duration = LaunchConfiguration('duration', default='600')
-    # 탐사 종료 시 점유격자맵을 저장할 경로(확장자 없이). 런타임 기본맵과 '같은 이름'으로
-    #   덮어써, 방금 만든 점유맵 + color_landmarks.yaml 이 같은 SLAM 좌표 한 쌍이 되게 한다.
-    map_save = LaunchConfiguration('map_save', default=os.path.join(pkg, 'maps', 'color_room'))
+    # 저장 이름(버전). 점유맵 + 색좌표를 '한 이름'으로 묶어 저장 → 같은 SLAM 좌표 한 쌍.
+    #   예: map_name:=run2 → maps/run2.pgm/yaml + maps/run2_landmarks.yaml (기존 안 덮음).
+    maps_dir = os.path.join(pkg, 'maps')
+    map_name = LaunchConfiguration('map_name', default='color_room')
+    map_save = [maps_dir + os.sep, map_name]                       # 점유맵 경로(확장자 없이)
+    landmarks = [maps_dir + os.sep, map_name, '_landmarks.yaml']   # 색좌표 경로
     # 매핑 종료 품질 게이트: 자연 종료 시 색+숫자 벽이 이 수 미만이면 재탐사(0=끔).
     min_walls = LaunchConfiguration('min_walls', default='1')
+    # 매핑 방식: false=단일패스(접근 중 ALIGN 정면정렬 → 인식 잘 됨, 기본/권장)
+    #   true=2패스(Phase1 탐사+색좌표 → Phase2 Nav2 정면방문). 단일패스가 색 인식이 더 좋다.
+    two_pass = LaunchConfiguration('two_pass', default='false')
+    # 벽타기 시 오른쪽 벽 유지거리[m] — 클수록 벽과 멀리 돈다.
+    wall_dist = LaunchConfiguration('wall_dist', default='0.6')
+    # color_mapper require_digit = NOT two_pass (2-pass Phase1 은 색만 저장).
+    require_digit = PythonExpression(["'false' if '", two_pass, "' == 'true' else 'true'"])
 
     gazebo_ros = get_package_share_directory('gazebo_ros')
     tb3_gazebo = get_package_share_directory('turtlebot3_gazebo')
     slam_toolbox = get_package_share_directory('slam_toolbox')
+    nav2_bringup = get_package_share_directory('nav2_bringup')
 
     gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_ros, 'launch', 'gzserver.launch.py')),
@@ -116,7 +129,10 @@ def generate_launch_description():
     maze_proc = ExecuteProcess(
         cmd=['python3', maze_explorer, '--duration', duration,
              '--ros-args', '-p', ['use_sim_time:=', use_sim_time],
-             '-p', ['min_quality_walls:=', min_walls]],
+             '-p', ['min_quality_walls:=', min_walls],
+             '-p', ['two_pass:=', two_pass],
+             '-p', ['target_right:=', wall_dist],
+             '-p', ['landmarks_path:='] + landmarks],
         condition=IfCondition(maze_cond), output='screen',
     )
     scan_proc = ExecuteProcess(
@@ -142,14 +158,18 @@ def generate_launch_description():
         cmd=['python3', vision_node, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
     )
-    # color_mapper 는 '색+숫자 둘 다' 인식된 칸만 저장(무조건) → digit_recognizer 가 필수다.
+    # color_mapper — 2-pass(require_digit=false): Phase1 은 색 좌표만 저장(Phase2 가 숫자 채움).
+    #   단일패스(require_digit=true): 색+숫자 둘 다인 칸만 저장.
     mapper_proc = ExecuteProcess(
-        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['require_digit:=', require_digit],
+             '-p', ['save_path:='] + landmarks],
         condition=IfCondition(explore), output='screen',
     )
     # 매핑 중 라이브 품질 체크리스트(색별 벽수/digit/누락 경고).
     quality_proc = ExecuteProcess(
-        cmd=['python3', quality_monitor],
+        cmd=['python3', quality_monitor, '--ros-args',
+             '-p', ['landmarks_path:='] + landmarks],
         condition=IfCondition(explore), output='screen',
     )
     # 숫자 인식기(EasyOCR) — 색+숫자 둘 다 저장이 필수이므로 매핑에 '상시' 동반.
@@ -157,6 +177,24 @@ def generate_launch_description():
     digit_proc = ExecuteProcess(
         cmd=['python3', digit_recognizer, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
         condition=IfCondition(explore), output='screen',
+    )
+    # ── 2-pass Phase2 용 ── Nav2 navigation(planner/controller/bt) — slam 과 공존(AMCL/map_server
+    #   없음: /map 과 map→odom 은 slam_toolbox 가 제공). two_pass 일 때만.
+    nav2_cond = PythonExpression(["'", explore, "' == 'true' and '", two_pass, "' == 'true'"])
+    nav2_nav = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(nav2_bringup, 'launch', 'navigation_launch.py')),
+        launch_arguments={'use_sim_time': use_sim_time, 'params_file': nav2_params,
+                          'autostart': 'true'}.items(),
+        condition=IfCondition(nav2_cond),
+    )
+    # Phase2 코디네이터 — /phase1_done 받으면 색좌표마다 Nav2 정면 주행 + 수직정렬 + 숫자확정 → 맵저장.
+    finalizer_proc = ExecuteProcess(
+        cmd=['python3', digit_finalizer, '--ros-args',
+             '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['map_save:='] + map_save,
+             '-p', ['landmarks_path:='] + landmarks],
+        condition=IfCondition(nav2_cond), output='screen',
     )
 
     # ── 탐사 종료 → 점유격자맵 자동저장 (맵 핸드오프 자동화) ──────────────────
@@ -205,12 +243,17 @@ def generate_launch_description():
                               description='가제보 GUI 창 표시(기본 false=안 띄움, RViz 로 관찰)'),
         DeclareLaunchArgument('duration', default_value='600',
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
-        DeclareLaunchArgument('map_save', default_value=os.path.join(pkg, 'maps', 'color_room'),
-                              description='탐사 종료 시 점유격자맵 저장 경로(확장자 없이)'),
+        DeclareLaunchArgument('map_name', default_value='color_room',
+                              description='저장 이름 — maps/<name>.pgm/yaml + maps/<name>_landmarks.yaml (버전 분리용)'),
         DeclareLaunchArgument('min_walls', default_value='1',
                               description='매핑 종료 품질 게이트: 색+숫자 벽 최소수(미달이면 재탐사, 0=끔)'),
+        DeclareLaunchArgument('two_pass', default_value='false',
+                              description='false=단일패스(ALIGN 정면정렬, 기본/권장) | true=2패스(Nav2 Phase2)'),
+        DeclareLaunchArgument('wall_dist', default_value='0.6',
+                              description='벽타기 오른쪽 벽 유지거리[m] (클수록 벽과 멀리)'),
         guard_proc, guard_handler,
         gzserver, gzclient, rsp, spawn, slam,
         upright_proc, vision_proc, maze_proc, scan_proc, wf_proc, mapper_proc, quality_proc, digit_proc,
+        nav2_nav, finalizer_proc,
         save_on_maze, save_on_scan, save_on_wall,
     ])

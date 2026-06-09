@@ -197,6 +197,16 @@ class MazeTour(Node):
                 rclpy.spin_once(self, timeout_sec=0.2)
         return None
 
+    def frontal_pose(self, w):
+        """정면 접근 포즈. 색맵에 저장된 시점법선(nx,ny)이 있으면 '실제로 본 면 쪽'에서
+        수직으로 접근(중앙 박스처럼 면이 바깥을 향해도 올바른 면). 없으면 중심(0,0) 쪽 폴백."""
+        nx, ny = w.get('nx'), w.get('ny')
+        if nx is not None and ny is not None and (abs(nx) + abs(ny)) > 1e-3:
+            ax, ay = w['x'] + self.standoff * nx, w['y'] + self.standoff * ny
+            yaw = math.atan2(w['y'] - ay, w['x'] - ax)   # 벽(패널)을 바라봄 = 법선 따라 수직
+            return ax, ay, yaw
+        return approach_pose(w['x'], w['y'], self.standoff)
+
     def make_pose(self, x, y, yaw):
         p = PoseStamped()
         p.header.frame_id = self.map_frame
@@ -336,7 +346,7 @@ class MazeTour(Node):
         kor = KOR.get(self.target, self.target)
         digit_map = {}
         for w in walls:
-            ax, ay, yaw = approach_pose(w['x'], w['y'], self.standoff)
+            ax, ay, yaw = self.frontal_pose(w)
             if not self.nav_to(ax, ay, yaw, f'탐색 {kor}{w["id"]}'):
                 continue
             seen = []
@@ -419,7 +429,7 @@ class MazeTour(Node):
         failed = []             # [(id, 사유), ...] 접근/확인 실패한 벽
         for w in order:
             wid = w['id']
-            ax, ay, yaw = approach_pose(w['x'], w['y'], self.standoff)
+            ax, ay, yaw = self.frontal_pose(w)
             label = f'{kor} {wid}번 ({w["x"]:.2f},{w["y"]:.2f})'
             if not self.nav_to(ax, ay, yaw, label):
                 self.get_logger().error(f'{kor} {wid}번 접근 실패')

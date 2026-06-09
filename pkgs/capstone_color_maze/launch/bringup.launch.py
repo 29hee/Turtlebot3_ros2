@@ -35,7 +35,7 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 def generate_launch_description():
     here = os.path.dirname(os.path.realpath(__file__))
     pkg = os.path.dirname(here)
-    default_map = os.path.join(pkg, 'maps', 'color_room.yaml')
+    maps_dir = os.path.join(pkg, 'maps')
     default_params = os.path.join(pkg, 'config', 'nav2_maze.yaml')
     color_confirm = os.path.join(pkg, 'scripts', 'color_confirm.py')
     maze_tour = os.path.join(pkg, 'scripts', 'maze_tour.py')
@@ -54,10 +54,11 @@ def generate_launch_description():
     relocalize = LaunchConfiguration('relocalize', default=_reloc_default)
     # 거꾸로 장착 카메라 보정(image_upright). 실로봇(start_gazebo:=false)에서만 동작.
     flip = LaunchConfiguration('flip', default='180')
-    map_yaml = LaunchConfiguration('map', default=default_map)
+    # 맵핑과 '같은 이름'으로 점유맵 + 색좌표 로드 (maps/<map_name>.yaml + _landmarks.yaml) — GAP1.
+    map_name = LaunchConfiguration('map_name', default='color_room')
+    map_yaml = LaunchConfiguration('map', default=[maps_dir + os.sep, map_name, '.yaml'])
     params_file = LaunchConfiguration('params_file', default=default_params)
-    default_landmarks = os.path.join(pkg, 'maps', 'color_landmarks.yaml')
-    landmarks = LaunchConfiguration('landmarks', default=default_landmarks)
+    landmarks = LaunchConfiguration('landmarks', default=[maps_dir + os.sep, map_name, '_landmarks.yaml'])
 
     nav2_bringup = get_package_share_directory('nav2_bringup')
 
@@ -127,9 +128,11 @@ def generate_launch_description():
                               description='기본: 실로봇(start_gazebo:=false)=true, 시뮬=false. 시작 시 자기위치 추정'),
         DeclareLaunchArgument('flip', default_value='180',
                               description='image_upright 회전(180|v|h). 실로봇 카메라 거꾸로면 180'),
-        DeclareLaunchArgument('map', default_value=default_map),
-        DeclareLaunchArgument('landmarks', default_value=default_landmarks,
-                              description='색 시맨틱맵(color_landmarks.yaml) 경로'),
+        DeclareLaunchArgument('map_name', default_value='color_room',
+                              description='맵핑과 같은 이름 — maps/<name>.yaml + maps/<name>_landmarks.yaml 로드'),
+        DeclareLaunchArgument('map', default_value=[maps_dir + os.sep, map_name, '.yaml']),
+        DeclareLaunchArgument('landmarks', default_value=[maps_dir + os.sep, map_name, '_landmarks.yaml'],
+                              description='색 시맨틱맵 경로(기본: maps/<map_name>_landmarks.yaml)'),
         DeclareLaunchArgument('params_file', default_value=default_params),
         guard_proc, guard_handler,
         gazebo,

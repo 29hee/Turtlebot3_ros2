@@ -33,7 +33,12 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 def generate_launch_description():
     here = os.path.dirname(os.path.realpath(__file__))
     pkg = os.path.dirname(here)                      # capstone_color_maze/
-    default_map = os.path.join(pkg, 'maps', 'color_room.yaml')   # 현재 월드(color_room) 재매핑 맵
+    maps_dir = os.path.join(pkg, 'maps')
+    # 맵핑과 '같은 이름'으로 점유맵 + 색좌표를 읽는다(맵핑은 maps/<map_name>.yaml +
+    #   maps/<map_name>_landmarks.yaml 로 저장 → GAP1 핸드오프 일치).
+    map_name = LaunchConfiguration('map_name', default='color_room')
+    default_map = [maps_dir + os.sep, map_name, '.yaml']
+    landmarks = [maps_dir + os.sep, map_name, '_landmarks.yaml']
     default_params = os.path.join(pkg, 'config', 'nav2_maze.yaml')
     color_confirm = os.path.join(pkg, 'scripts', 'color_confirm.py')
     maze_tour = os.path.join(pkg, 'scripts', 'maze_tour.py')
@@ -91,6 +96,7 @@ def generate_launch_description():
              '-p', ['target_color:=', target_color],
              '-p', ['use_sim_time:=', use_sim_time],
              '-p', ['relocalize:=', relocalize],
+             '-p', ['landmarks_path:='] + landmarks,
              '-p', 'oneshot:=true'],
         output='screen',
     )
@@ -133,6 +139,8 @@ def generate_launch_description():
                               description='기본: 실로봇(start_gazebo:=false)=true, 시뮬=false. 순회 전 자기위치 추정'),
         DeclareLaunchArgument('flip', default_value='180',
                               description='image_upright 회전(180|v|h). 실로봇 카메라 거꾸로면 180'),
+        DeclareLaunchArgument('map_name', default_value='color_room',
+                              description='맵핑과 같은 이름 — maps/<name>.yaml + maps/<name>_landmarks.yaml 로드'),
         DeclareLaunchArgument('map', default_value=default_map),
         DeclareLaunchArgument('params_file', default_value=default_params),
         guard_proc, guard_handler,

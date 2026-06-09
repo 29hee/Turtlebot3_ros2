@@ -82,6 +82,9 @@ class ColorMapper(Node):
         self.declare_parameter('min_votes', 5)         # 이 득표 이상인 칸만 채택
         self.declare_parameter('save_path', default_landmarks_path())
         self.declare_parameter('save_period', 3.0)
+        # 2-pass 매핑: Phase1 은 '색 좌표만' 저장(require_digit=false), Phase2 가 정면 방문해
+        #   숫자를 채운다. require_digit=true(기본)면 색+숫자 둘 다 있는 칸만 저장(단일패스 호환).
+        self.declare_parameter('require_digit', True)
 
         self.map_frame = self.get_parameter('map_frame').value
         self.base_frame = self.get_parameter('base_frame').value
@@ -91,12 +94,16 @@ class ColorMapper(Node):
         self.min_votes = int(self.get_parameter('min_votes').value)
         self.save_path = self.get_parameter('save_path').value
         self.save_period = float(self.get_parameter('save_period').value)
+        self.require_digit = bool(self.get_parameter('require_digit').value)
         self._dropped_nodigit = 0   # 숫자 미상으로 보류된 칸 수(저장 시 경고용)
 
         self.scan = None
         self._latest_digit = -1
         self.votes = {}        # {(gx,gy): {'RED':n,...}}
         self.digit_votes = {}  # {(gx,gy): {digit:count}}
+        # 시점방향(법선): 벽에서 '로봇이 본 쪽'을 누적 → Phase2 가 그 면에서 정면 접근.
+        #   (중앙 박스는 면이 바깥을 향하므로 중심쪽 접근이 틀림 → 본 방향을 따라야 함.)
+        self.normals = {}      # {(gx,gy): [sum_nx, sum_ny]}
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -151,7 +158,9 @@ class ColorMapper(Node):
         q = (tf.transform.rotation.x, tf.transform.rotation.y,
              tf.transform.rotation.z, tf.transform.rotation.w)
         rx, ry, _ = quat_rotate(q, (d, 0.0, 0.0))
-        self.vote(color, t.x + rx, t.y + ry)
+        # 시점방향(벽→로봇) 단위벡터 = -(전방벡터)/d. Phase2 가 이 쪽에서 정면 접근.
+        nx, ny = (-rx / d, -ry / d) if d > 1e-6 else (0.0, 0.0)
+        self.vote(color, t.x + rx, t.y + ry, nx, ny)
 
     # ── 격자 투표 ─────────────────────────────────────────────────
     def cell_of(self, x, y):
@@ -160,19 +169,30 @@ class ColorMapper(Node):
     def cell_center(self, gx, gy):
         return ((gx + 0.5) * self.grid_res, (gy + 0.5) * self.grid_res)
 
-    def vote(self, color, x, y):
+    def vote(self, color, x, y, nx=0.0, ny=0.0):
         key = self.cell_of(x, y)
         cell = self.votes.setdefault(key, {c: 0 for c in VALID_COLORS})
         cell[color] += 1
+        nrm = self.normals.setdefault(key, [0.0, 0.0])
+        nrm[0] += nx
+        nrm[1] += ny
         if self._latest_digit >= 0:
             dcell = self.digit_votes.setdefault(key, {})
             dcell[self._latest_digit] = dcell.get(self._latest_digit, 0) + 1
         self.publish_markers()
 
+    def cell_normal(self, gx, gy):
+        """칸의 평균 시점방향(단위벡터). 없으면 (0,0)."""
+        nrm = self.normals.get((gx, gy))
+        if not nrm:
+            return 0.0, 0.0
+        mag = math.hypot(nrm[0], nrm[1])
+        return (nrm[0] / mag, nrm[1] / mag) if mag > 1e-6 else (0.0, 0.0)
+
     def finalized(self):
-        """채택된 칸만: [(color, cx, cy, votes, digit), ...].
-        ★ 색+숫자 둘 다 인식된 칸만 채택한다(무조건). digit 없는 칸은 보류(저장 제외)하고
-        _dropped_nodigit 로 세어 '재접근해 숫자 읽어야 함'을 알린다."""
+        """채택된 칸만: [(color, cx, cy, votes, digit, nx, ny), ...].
+        require_digit=true(단일패스): 색+숫자 둘 다인 칸만. false(2-pass Phase1): 색만이라도.
+        nx,ny = 평균 시점방향(Phase2 정면접근용)."""
         out = []
         self._dropped_nodigit = 0
         for (gx, gy), cnt in self.votes.items():
@@ -184,9 +204,12 @@ class ColorMapper(Node):
             dcell = self.digit_votes.get((gx, gy), {})
             digit = max(dcell, key=dcell.get) if dcell else None
             if digit is None:
-                self._dropped_nodigit += 1     # 색만 잡힘 → 숫자 읽을 때까지 보류(색+숫자 필수)
-                continue
-            out.append((color, cx, cy, cnt[color], digit))
+                self._dropped_nodigit += 1     # 색만 잡힘
+                if self.require_digit:
+                    continue                   # 단일패스: 색+숫자 둘 다라야 저장
+                # 2-pass Phase1: 색만이라도 좌표 저장(Phase2 가 정면 방문해 숫자 채움)
+            nx, ny = self.cell_normal(gx, gy)
+            out.append((color, cx, cy, cnt[color], digit, nx, ny))
         return out
 
     # ── 출력 ──────────────────────────────────────────────────────
@@ -197,7 +220,7 @@ class ColorMapper(Node):
         clear.action = Marker.DELETEALL
         arr.markers.append(clear)
         mid = 0
-        for color, cx, cy, _, _ in self.finalized():
+        for color, cx, cy, _, _, _, _ in self.finalized():
             r, g, b = MARKER_RGB[color]
             m = Marker()
             m.header.frame_id = self.map_frame
@@ -219,17 +242,20 @@ class ColorMapper(Node):
 
     def save_cb(self):
         fin = self.finalized()
-        if self._dropped_nodigit:
+        if self.require_digit and self._dropped_nodigit:
             self.get_logger().warn(
                 f"숫자 미상으로 {self._dropped_nodigit}칸 보류 — "
                 f"색+숫자 둘 다 인식돼야 저장됨. 해당 패널 재접근해 숫자를 읽힐 것")
         if not fin:
             return
         data = {c: [] for c in VALID_COLORS}
-        for color, cx, cy, v, digit in fin:
+        for color, cx, cy, v, digit, nx, ny in fin:
             entry = {'x': round(cx, 3), 'y': round(cy, 3), 'votes': v}
             if digit is not None:
                 entry['digit'] = digit
+            if nx or ny:                       # 시점방향(Phase2 정면접근용)
+                entry['nx'] = round(nx, 3)
+                entry['ny'] = round(ny, 3)
             data[color].append(entry)
         try:
             os.makedirs(os.path.dirname(self.save_path), exist_ok=True)

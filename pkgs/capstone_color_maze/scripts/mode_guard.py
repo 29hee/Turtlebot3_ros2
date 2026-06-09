@@ -18,9 +18,11 @@ import rclpy
 from rclpy.node import Node
 
 # 각 모드를 켤 때 '있으면 안 되는' 반대 모드 노드들(베이스 이름).
+#   ※ Nav2(controller/planner/bt)는 이제 매핑(2-pass Phase2)·런타임 둘 다 쓰므로 구분에서 제외.
+#     매핑↔런타임을 가르는 결정적 노드: 매핑=slam_toolbox, 런타임=amcl/maze_tour.
 CONFLICT = {
-    'mapping': ['amcl', 'maze_tour', 'bt_navigator', 'controller_server', 'planner_server'],
-    'runtime': ['slam_toolbox', 'maze_explorer', 'color_mapper'],
+    'mapping': ['amcl', 'maze_tour', 'color_confirm'],
+    'runtime': ['slam_toolbox', 'maze_explorer', 'color_mapper', 'digit_finalizer'],
 }
 
 

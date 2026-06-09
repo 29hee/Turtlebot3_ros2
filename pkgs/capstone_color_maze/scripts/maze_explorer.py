@@ -31,10 +31,10 @@ import yaml
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String, Float32MultiArray, Int32
+from std_msgs.msg import String, Float32MultiArray, Int32, Bool
 import tf2_ros
 
 from maze_common import id_to_color, resolve_target_walls, VALID_COLORS
@@ -61,14 +61,14 @@ class MazeExplorer(Node):
 
         # ── 주행/벽타기 파라미터 ─────────────────────────────────────
         self.declare_parameter('v_fwd', 0.08)        # 전진 속도 [m/s] (느리게 — 색 놓치지 않게)
-        self.declare_parameter('target_right', 0.45)  # 오른쪽 벽 유지 거리 [m]
+        self.declare_parameter('target_right', 0.6)   # 오른쪽 벽 유지 거리 [m] (클수록 벽과 멀리)
         self.declare_parameter('front_stop', 0.45)    # 전방 정지 임계 [m]
         self.declare_parameter('spin_speed', 0.25)    # 회전 각속도 [rad/s] (느리게! SLAM 보호)
         # ── 색 접근(비주얼 서보) 파라미터 ───────────────────────────
         # 작은 색 조각(≈5%)만 보여도 그쪽으로 정렬·접근하도록 낮게 둔다.
         self.declare_parameter('seen_ratio', 0.03)    # ROI 색 점유율 ≥ 이 값이면 '발견' → 접근
         self.declare_parameter('standoff', 0.30)      # 패널 앞 정지 거리(라이다 정면) [m]
-        self.declare_parameter('capture_secs', 4.0)   # 근접 dwell 상한 [s] (숫자 확실 확인 시 조기복귀)
+        self.declare_parameter('capture_secs', 6.0)   # 근접 dwell 상한 [s] (숫자 확실 확인 시 조기복귀)
         self.declare_parameter('dedup_dist', 0.6)     # 이 거리 내 이미 캡처한 패널이면 재접근 스킵 [m]
         # ── 안티-스턱 파라미터 ───────────────────────────────────────
         self.declare_parameter('visit_res', 0.4)      # 방문 격자 한 변 [m]
@@ -76,10 +76,13 @@ class MazeExplorer(Node):
         self.declare_parameter('stuck_dist', 0.2)     # 윈도 동안 이 거리 미만 이동이면 '갇힘' [m]
         self.declare_parameter('escape_secs', 3.0)    # 탈출 기동 지속 [s]
         self.declare_parameter('loop_close_dist', 0.5)  # 시작 셀 복귀 판정 거리 [m]
+        # ★ 조기종료 차단: 충분히 탐색하기 전엔 'loop 완료'로 안 본다(작은 원에 끝나던 문제).
+        self.declare_parameter('min_visited_for_loop', 40)  # 이 방문셀 수 전엔 loop closure 금지
+        self.declare_parameter('loop_left_dist', 1.5)       # 시작셀에서 이만큼 벗어나야 '떠남' 인정 [m]
         self.declare_parameter('tf_lost_spin', 1.5)   # TF 끊김 시 제자리 회전 최대 [s]
         # 색 접근이 이 시간 안에 근접(standoff) 도달 못 하면 포기하고 벽타기 복귀.
         #   (어안렌즈로 색 중심 정렬이 안 돼 제자리 회전만 하는 무한루프 방지.)
-        self.declare_parameter('approach_timeout', 20.0)
+        self.declare_parameter('approach_timeout', 14.0)
         # ── 센서/odom 생존 워치독 ────────────────────────────────────
         #   라이다(/scan)나 위치(TF map→base_link)가 끊기면(예: turtlebot3_node 배터리로
         #   사망, 라이다 멈춤) '탐사 중'으로 착각하며 헛돌지 않게 즉시 정지+경고한다.
@@ -91,6 +94,9 @@ class MazeExplorer(Node):
         #   시간 상한(total)은 그대로 안전망이라 무한루프 없음.
         self.declare_parameter('min_quality_walls', 1)   # 종료 전 필요한 색+숫자 벽 최소수(0=끔)
         self.declare_parameter('max_resweeps', 2)        # 품질 미달 시 재탐사 최대 횟수
+        # 2-pass 매핑: true 면 Phase1(탐사+색좌표)만 하고 색 접근/숫자 dwell 안 함.
+        #   탐사 완료 시 /phase1_done 발행하고 idle → digit_finalizer(Phase2)가 정면방문해 숫자 확정.
+        self.declare_parameter('two_pass', False)
         # 접근 중 색이 잠깐 NONE 으로 '깜빡'해도 이 시간 안엔 중단하지 않는다(오실레이션 방지).
         #   어안렌즈+낮은 점유율(3%)이라 색이 자주 깜빡 → 즉시중단하면 제자리 빙빙이 난다.
         self.declare_parameter('approach_lost_grace', 1.5)   # 색 끊김 허용 [s]
@@ -101,6 +107,22 @@ class MazeExplorer(Node):
         # 캡처/스킵 직후 '그 타겟을 벗어날 때까지' 색 무시하고 전진(같은 타겟 즉시 재트리거 차단).
         self.declare_parameter('moveon_secs', 4.0)           # 벗어나기 최대 시간 [s]
         self.declare_parameter('moveon_dist', 0.5)           # 벗어나기 목표 이동거리 [m]
+        # ★ 정면 정렬: APPROACH 도착(가까워짐) 후 숫자 읽기 전, 제자리에서 고개를 돌려
+        #   '패널(색) 한가운데'를 보도록 color blob cx 를 0 으로 맞춘다(옆에서 비스듬히 읽기 방지).
+        self.declare_parameter('align_cx_tol', 0.10)         # 색 중심 허용오차(|cx|)
+        self.declare_parameter('align_secs', 8.0)            # 정면 재배치 최대 시간 [s]
+        # ★ 정면 재배치: 색까지 라이다 거리가 이 값 이하로 가까워지면, 라이다로 벽 법선을 구해
+        #   '패널 바로 앞(수직·정면)' 으로 이동한 뒤 숫자를 읽는다(대각선 읽기 제거).
+        self.declare_parameter('frontal_start', 0.6)         # 정면 재배치 시작 거리 [m]
+        self.declare_parameter('frontal_pos_tol', 0.12)      # 정면 목표 위치 허용오차 [m]
+        # 색 blob 화면중심(cx: -1~+1)을 방위각으로 환산하는 스케일 — 타겟추정/중복판정 정확도용.
+        #   cx=±1 ≈ ±이 각도. 어안 ROI 기준 대략값(같은 패널을 옆에서 봐도 같은 좌표로 추정).
+        self.declare_parameter('cx_fov_deg', 60.0)
+        # 색 접근 거리 게이트: 그 색 방향(라이다)까지 이 거리보다 멀면 접근 안 함.
+        #   멀리 스쳐 보인 색(중앙 박스/복도 끝)으로 헛걸음하지 않게. color_mapper max_range 와 짝.
+        self.declare_parameter('approach_max_dist', 1.2)
+        # 색별 목표 개수 — 이만큼 색+숫자 벽을 이미 확보한 색은 더 접근/인식 안 함(완료 색 무시).
+        self.declare_parameter('per_color_target', 3)
 
         self.total = duration
         self.v_fwd = float(self.get_parameter('v_fwd').value)
@@ -117,25 +139,41 @@ class MazeExplorer(Node):
         self.escape_secs = float(self.get_parameter('escape_secs').value)
         self.loop_close_dist = float(self.get_parameter('loop_close_dist').value)
         self.tf_lost_spin = float(self.get_parameter('tf_lost_spin').value)
+        self.min_visited_for_loop = int(self.get_parameter('min_visited_for_loop').value)
+        self.loop_left_dist = float(self.get_parameter('loop_left_dist').value)
         self.approach_timeout = float(self.get_parameter('approach_timeout').value)
         self.sensor_timeout = float(self.get_parameter('sensor_timeout').value)
         self.pose_lost_limit = float(self.get_parameter('pose_lost_limit').value)
         self.min_quality_walls = int(self.get_parameter('min_quality_walls').value)
         self.max_resweeps = int(self.get_parameter('max_resweeps').value)
+        self.two_pass = bool(self.get_parameter('two_pass').value)
+        self._phase1_done = False
         self.approach_lost_grace = float(self.get_parameter('approach_lost_grace').value)
         self.approach_stall_win = float(self.get_parameter('approach_stall_win').value)
         self.approach_min_move = float(self.get_parameter('approach_min_move').value)
         self.moveon_secs = float(self.get_parameter('moveon_secs').value)
         self.moveon_dist = float(self.get_parameter('moveon_dist').value)
+        self.align_cx_tol = float(self.get_parameter('align_cx_tol').value)
+        self.align_secs = float(self.get_parameter('align_secs').value)
+        self.frontal_start = float(self.get_parameter('frontal_start').value)
+        self.frontal_pos_tol = float(self.get_parameter('frontal_pos_tol').value)
+        self._frontal_goal = None      # (tx,ty,tyaw) 정면 목표 포즈
+        self.cx_fov_deg = float(self.get_parameter('cx_fov_deg').value)
+        self.approach_max_dist = float(self.get_parameter('approach_max_dist').value)
+        self.per_color_target = int(self.get_parameter('per_color_target').value)
+        self._color_counts = {}        # {color: 색+숫자 벽 수} 캐시
+        self._color_counts_t = None    # 캐시 갱신 시각
         self._appr_pose0 = None        # 접근 시작 위치(스톨 감지 기준)
         self._appr_stall_t = None      # 스톨 윈도 기준 시각
         self._moveon_pose0 = None      # MOVEON 시작 위치(벗어난 거리 측정)
         self._resweeps = 0
         self._last_color_t = None   # 마지막으로 색을 본 시각(접근 유예 판정)
         self._appr_cx = 0.0         # 마지막 유효 색 중심 cx(깜빡 동안 서보 방향 유지)
-        # color_mapper 와 동일 경로의 color_landmarks.yaml (품질 게이트에서 읽음)
+        # color_mapper 와 '같은' 색맵 경로(품질 게이트에서 읽음) — launch 가 map_name 으로 맞춰줌.
         _here = os.path.dirname(os.path.realpath(__file__))
-        self._landmarks_path = os.path.join(os.path.dirname(_here), 'maps', 'color_landmarks.yaml')
+        _def_lm = os.path.join(os.path.dirname(_here), 'maps', 'color_landmarks.yaml')
+        self.declare_parameter('landmarks_path', _def_lm)
+        self._landmarks_path = self.get_parameter('landmarks_path').value
 
         # ── IO ───────────────────────────────────────────────────────
         self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
@@ -150,6 +188,9 @@ class MazeExplorer(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         # 진척 상황 방송(quality_monitor/로그용): "PERIMETER", "CAPTURE RED@(x,y)" 등
         self.pub_phase = self.create_publisher(String, '/explorer_phase', 10)
+        # Phase1(탐사) 완료 신호 — 늦게 뜬 digit_finalizer 도 받게 latched(transient_local).
+        _latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_phase1_done = self.create_publisher(Bool, '/phase1_done', _latched)
 
         # ── 상태 ─────────────────────────────────────────────────────
         self.scan = None
@@ -227,6 +268,30 @@ class MazeExplorer(Node):
             d += 1
         return min(vals) if vals else float('inf')
 
+    def color_range(self):
+        """현재 보는 색 방향(cx)의 라이다 거리 [m]. 그 방향 벽까지 거리로 본다(접근 거리게이트용)."""
+        deg = math.degrees(-self.color_cx * self.cx_fov_deg)
+        d = self.sector_min(deg - 12, deg + 12)
+        if not math.isfinite(d):
+            d = self.sector_min(-15, 15)
+        return d
+
+    def nearest_front_angle(self):
+        """전방 ±90° 에서 가장 가까운 점(=벽)의 방위각[rad]. 정면(수직) 정렬에 쓴다. 없으면 None."""
+        s = self.scan
+        if s is None:
+            return None
+        n = len(s.ranges)
+        best_r, best_a = float('inf'), None
+        a = -90
+        while a <= 90:
+            idx = int(round((math.radians(a) - s.angle_min) / s.angle_increment)) % n
+            r = s.ranges[idx]
+            if r and math.isfinite(r) and s.range_min < r < s.range_max and r < best_r:
+                best_r, best_a = r, math.radians(a)
+            a += 2
+        return best_a
+
     def get_pose(self):
         try:
             tf = self.tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
@@ -256,7 +321,7 @@ class MazeExplorer(Node):
         cmd = Twist()
         if front < self.front_stop:
             cmd.angular.z = 0.4            # 전방 막힘 → 좌회전(천천히)
-        elif right > 0.9:
+        elif right > self.target_right + 0.45:   # 유지거리 + 여유 넘으면 '벽 잃음'
             cmd.linear.x = 0.07            # 오른벽 잃음 → 오른쪽으로 붙기
             cmd.angular.z = -0.3
         else:
@@ -290,6 +355,10 @@ class MazeExplorer(Node):
         if phase is not None:
             self.phase = phase
         if interrupt != '__keep__':
+            # 인터럽트(접근/정렬/캡처 등 정지성 작업) 종료 → 워치독 기준점 리셋.
+            #   안 그러면 캡처 동안 '안 움직임'을 갇힘으로 오판해 헛 ESCAPE 친다.
+            if interrupt is None:
+                self.wd_pose = None
             self.interrupt = interrupt
         self.phase_start = self.now()
 
@@ -310,9 +379,16 @@ class MazeExplorer(Node):
 
     # ── 메인 루프 ────────────────────────────────────────────────────
     def on_timer(self):
+        # 2-pass: Phase1 끝났으면 idle(주행 멈춤) — Phase2(Nav2)가 cmd_vel 을 잡는다.
+        if self._phase1_done:
+            self.pub.publish(Twist())
+            return
         # 0) 안전 상한(시간) — 종료는 본래 미방문 소진이지만, 폭주 방지용 상한.
         if self.elapsed(self.start) > self.total:
-            self.stop_and_quit(f'시간 상한({self.total:.0f}s) 도달 → 정지')
+            if self.two_pass:
+                self._finish_phase1(f'시간 상한({self.total:.0f}s) 도달 → Phase1 종료')
+            else:
+                self.stop_and_quit(f'시간 상한({self.total:.0f}s) 도달 → 정지')
             return
         if self.scan is None:
             return
@@ -382,7 +458,7 @@ class MazeExplorer(Node):
         # 2) 갇힘 감지(B) → ESCAPE 인터럽트
         #    CAPTURE(정지 dwell 정상) / APPROACH(색 중심 정렬 위해 제자리 회전 가능)는 제외 —
         #    APPROACH 는 자체 approach_timeout 으로 무한루프를 막는다(아래).
-        if self.interrupt not in ('CAPTURE', 'APPROACH') and self.watchdog_stuck(pose):
+        if self.interrupt not in ('CAPTURE', 'APPROACH', 'ALIGN') and self.watchdog_stuck(pose):
             self.get_logger().warn('진행 워치독: 갇힘 감지 → 탈출 기동')
             self.publish_phase('ESCAPE')
             self.switch(interrupt='ESCAPE')
@@ -429,13 +505,54 @@ class MazeExplorer(Node):
                     or self.elapsed(self._last_color_t) > self.approach_lost_grace):
                 self.switch(interrupt=None)   # 색 진짜로 놓침 → 일반 국면
                 return
-            if arrived:
-                self.publish_phase(f'CAPTURE {self.color}')
-                self.get_logger().info(f'패널 근접 도달({self.color}) → 숫자 확실 확인 대기(상한 {self.capture_secs:.1f}s)')
-                self._digit = -1               # 이번 캡처에서 '새로' 읽힌 숫자만 인정(이전값 무시)
-                self.switch(interrupt='CAPTURE')
+            # ★ 충분히 가까워지면(또는 standoff 도달) → '정면 위치로 이동'(ALIGN) 시작.
+            #   제자리에서 보는 게 아니라, 라이다 벽 법선으로 패널 바로 앞 수직 포즈를 잡아 그리로 간다.
+            near = min(self.sector_min(-15, 15), self.color_range())
+            if arrived or near <= self.frontal_start:
+                self._frontal_goal = self._compute_frontal_goal(pose)
+                self.publish_phase(f'ALIGN {self.color}')
+                self.get_logger().info(f'패널 근접({self.color}, ~{near:.2f}m) → 정면 위치로 이동')
+                self.switch(interrupt='ALIGN')
                 return
             self.pub.publish(cmd)
+            return
+
+        if self.interrupt == 'ALIGN':
+            # ★ 패널 '바로 앞(수직·정면)' 목표 포즈로 '이동'한다(제자리회전 아님).
+            if self._frontal_goal is None:
+                self._frontal_goal = self._compute_frontal_goal(pose)
+            tx, ty, tyaw = self._frontal_goal
+            x, y, yaw = pose
+            timed_out = self.elapsed(self.phase_start) >= self.align_secs
+            dist = math.hypot(tx - x, ty - y)
+            if not timed_out and dist > self.frontal_pos_tol:
+                # 정면 목표점으로 주행: 먼저 그쪽을 보고, 정렬되면 전진. 벽에 너무 붙으면 살짝 후진.
+                herr = wrap(math.atan2(ty - y, tx - x) - yaw)
+                front = self.sector_min(-15, 15)
+                c = Twist()
+                if abs(herr) > 0.35:
+                    c.angular.z = max(-0.4, min(0.4, 0.9 * herr))
+                elif front < 0.18:
+                    c.linear.x = -0.05
+                    c.angular.z = max(-0.3, min(0.3, 0.9 * herr))
+                else:
+                    c.linear.x = min(0.08, 0.5 * dist)
+                    c.angular.z = max(-0.3, min(0.3, 0.9 * herr))
+                self.pub.publish(c)
+                return
+            # 위치 도달(또는 시간초과) → 패널을 정면으로 보도록 최종 회전.
+            yerr = wrap(tyaw - yaw)
+            if not timed_out and abs(yerr) > self.align_cx_tol:
+                c = Twist()
+                c.angular.z = max(-0.4, min(0.4, 0.9 * yerr))
+                self.pub.publish(c)
+                return
+            self.pub.publish(Twist())
+            self.get_logger().info(
+                f'패널 정면 도달(위치오차 {dist:.2f}m{", 시간초과" if timed_out else ""}) → 숫자 읽기')
+            self.publish_phase(f'CAPTURE {self.color}')
+            # _digit 는 APPROACH 시작 때 리셋됨 → APPROACH/ALIGN/CAPTURE 중 읽힌 숫자를 인정.
+            self.switch(interrupt='CAPTURE')
             return
 
         if self.interrupt == 'CAPTURE':
@@ -460,11 +577,19 @@ class MazeExplorer(Node):
                 self.switch(interrupt=None)    # 충분히 벗어남 → 색 탐색 재개
             return
 
-        # ── 색 발견 → 접근 트리거(중복/방금 캡처 제외) ──
-        if self.color != 'NONE' and not self._recently_captured(pose):
+        # ── 색 발견 → 접근 트리거(중복/방금 캡처/먼 색 제외) ──
+        #   2-pass: Phase1 은 색 접근/숫자 dwell 안 함 — 순수 탐사로 맵+색좌표만(color_mapper 가
+        #   벽 지나며 색 기록). 정면 방문·숫자는 Phase2(digit_finalizer)가 Nav2 로 처리.
+        #   ★ 거리게이트: 색까지 라이다 거리가 approach_max_dist 보다 멀면 무시(그쪽으로 안 감).
+        #   ★ 완료색 무시: 그 색을 이미 목표 수(3)만큼 확보했으면 더 접근 안 함.
+        if (not self.two_pass and self.color != 'NONE'
+                and not self._is_color_complete(self.color)
+                and self.color_range() <= self.approach_max_dist
+                and not self._recently_captured(pose)):
             self.publish_phase(f'APPROACH {self.color}')
             self._appr_pose0 = pose            # 스톨 감지 기준 위치/시각
             self._appr_stall_t = self.now()
+            self._digit = -1                   # 이 패널 시퀀스 동안 '새로' 읽힌 숫자만 인정
             self.switch(interrupt='APPROACH')
             return
 
@@ -472,15 +597,66 @@ class MazeExplorer(Node):
         self.run_phase(pose)
 
     def _target_xy(self, pose):
-        """정면 라이다 거리로 추정한 '패널(타겟) map 좌표' = 로봇 + d·heading.
-        캡처/스킵 중복을 '로봇 위치'가 아니라 '패널 위치' 기준으로 판정하기 위함
-        (같은 패널을 다른 바퀴/각도에서 봐도 한 번만 — green1→green2→red1 무한반복 차단)."""
+        """'색이 보이는 방향(cx)'으로 추정한 패널 map 좌표 = 로봇 + d·(yaw+bearing).
+        정면이 아니라 색 방위를 쓰므로, 캡처 후 패널을 '옆에 두고' 지나가도 같은 좌표로
+        추정 → 이미 잡은 패널로 인식해 재접근 안 함(같은 타겟 무한루프/재무는 것 차단)."""
         x, y, yaw = pose
-        d = self.sector_min(-15, 15)
+        bearing = math.radians(-self.color_cx * self.cx_fov_deg)   # cx>0=오른쪽=음의 각
+        deg = math.degrees(bearing)
+        d = self.sector_min(deg - 12, deg + 12)    # 그 방위의 라이다 거리(벽=가까운 점)
+        if not math.isfinite(d):
+            d = self.sector_min(-15, 15)
         if not math.isfinite(d):
             d = self.standoff
-        d = min(d, 1.0)                 # 너무 먼 추정은 신뢰 X
-        return (x + d * math.cos(yaw), y + d * math.sin(yaw))
+        d = min(d, 1.2)                            # 너무 먼 추정은 신뢰 X
+        ang = yaw + bearing
+        return (x + d * math.cos(ang), y + d * math.sin(ang))
+
+    def _wall_normal(self, pose, bearing_deg):
+        """패널 방위 주변(±30°) 라이다 점들을 직선적합해 벽 법선(map frame, 벽→로봇 방향) 추정.
+        못 구하면 None."""
+        s = self.scan
+        if s is None:
+            return None
+        n = len(s.ranges)
+        xs, ys = [], []
+        d = bearing_deg - 30
+        while d <= bearing_deg + 30:
+            idx = int(round((math.radians(d) - s.angle_min) / s.angle_increment)) % n
+            r = s.ranges[idx]
+            if r and math.isfinite(r) and s.range_min < r < s.range_max:
+                xs.append(r * math.cos(math.radians(d)))   # robot frame (x 전방)
+                ys.append(r * math.sin(math.radians(d)))
+            d += 2
+        if len(xs) < 6:
+            return None
+        mx = sum(xs) / len(xs); my = sum(ys) / len(ys)
+        sxx = sum((x - mx) ** 2 for x in xs)
+        syy = sum((y - my) ** 2 for y in ys)
+        sxy = sum((xs[i] - mx) * (ys[i] - my) for i in range(len(xs)))
+        theta = 0.5 * math.atan2(2 * sxy, sxx - syy)       # 벽 방향(주축) 각
+        nx, ny = -math.sin(theta), math.cos(theta)         # 법선(robot frame)
+        if nx > 0:                                         # 로봇(-x)쪽 향하게
+            nx, ny = -nx, -ny
+        yaw = pose[2]
+        return (nx * math.cos(yaw) - ny * math.sin(yaw),   # map frame
+                nx * math.sin(yaw) + ny * math.cos(yaw))
+
+    def _compute_frontal_goal(self, pose):
+        """'패널 바로 앞(standoff, 수직)' 목표 포즈 (tx,ty,tyaw) 계산. tyaw=패널을 바라봄."""
+        x, y, yaw = pose
+        bearing = math.radians(-self.color_cx * self.cx_fov_deg)   # 색 방위
+        pr = self.color_range()
+        if not math.isfinite(pr):
+            pr = self.standoff
+        panel = (x + pr * math.cos(yaw + bearing), y + pr * math.sin(yaw + bearing))
+        nrm = self._wall_normal(pose, math.degrees(bearing))
+        if nrm is None:                                    # 법선 실패 → 로봇→패널 반대쪽 폴백
+            nrm = (-math.cos(yaw + bearing), -math.sin(yaw + bearing))
+        tx = panel[0] + self.standoff * nrm[0]
+        ty = panel[1] + self.standoff * nrm[1]
+        tyaw = math.atan2(panel[1] - ty, panel[0] - tx)    # 패널 바라봄(=벽에 수직)
+        return (tx, ty, tyaw)
 
     def _start_moveon(self, pose):
         """캡처/스킵 직후 호출 — 그 타겟을 벗어날 때까지 색 무시하고 전진하는 MOVEON 진입."""
@@ -504,12 +680,14 @@ class MazeExplorer(Node):
             # 시작 셀을 충분히 벗어났다가 다시 돌아오면 둘레 한 바퀴 완료로 본다(C).
             d_start = math.hypot(x - (self.start_cell[0] + 0.5) * self.visit_res,
                                  y - (self.start_cell[1] + 0.5) * self.visit_res)
-            if not self.left_start and d_start > 1.0:
+            if not self.left_start and d_start > self.loop_left_dist:
                 self.left_start = True
-            if self.left_start and d_start < self.loop_close_dist:
+            # 충분히 돌았을 때만(방문셀 ≥ min_visited_for_loop) loop closure 인정 — 작은 원 종료 방지.
+            if (self.left_start and d_start < self.loop_close_dist
+                    and len(self.visited) >= self.min_visited_for_loop):
                 self.inward_target = self.visited_centroid()   # (0,0)=시작점 아님 → 둘레 중심으로
                 self.get_logger().info(
-                    f'=== 둘레 한 바퀴(loop closure) → 내부'
+                    f'=== 둘레 한 바퀴(loop closure, 방문셀 {len(self.visited)}) → 내부'
                     f'({self.inward_target[0]:+.1f},{self.inward_target[1]:+.1f}) 진입 ===')
                 self.publish_phase('INWARD')
                 self.switch('INWARD')
@@ -541,32 +719,57 @@ class MazeExplorer(Node):
         elif self.phase == 'ISLAND':
             d_start = math.hypot(x - (self.start_cell[0] + 0.5) * self.visit_res,
                                  y - (self.start_cell[1] + 0.5) * self.visit_res)
-            if not self.left_start and d_start > 1.0:
+            if not self.left_start and d_start > self.loop_left_dist:
                 self.left_start = True
-            if self.left_start and d_start < self.loop_close_dist:
+            if (self.left_start and d_start < self.loop_close_dist
+                    and len(self.visited) >= self.min_visited_for_loop):
                 self.complete_or_continue('=== 섬 한 바퀴 완료 → 탐사 종료 ===')
                 return
             self.pub.publish(self.wall_follow_cmd())
 
     # ── 품질 게이트 ──────────────────────────────────────────────────
-    def _count_quality_walls(self):
-        """color_landmarks.yaml 에서 '색+숫자' 가 확정된 '벽'(클러스터) 수를 센다.
-        파일 없음/깨짐은 0(노드는 안 죽음)."""
+    def _color_wall_counts(self):
+        """color_landmarks.yaml → {색: '색+숫자' 확정 벽 수}. 파일 없음/깨짐은 빈 dict."""
         try:
             with open(self._landmarks_path) as f:
                 data = yaml.safe_load(f) or {}
         except Exception:
-            return 0
-        total = 0
-        for c in VALID_COLORS:
-            for w in resolve_target_walls(data, c):
-                if w.get('digit') is not None:
-                    total += 1
-        return total
+            return {}
+        return {c: sum(1 for w in resolve_target_walls(data, c) if w.get('digit') is not None)
+                for c in VALID_COLORS}
+
+    def _count_quality_walls(self):
+        """색+숫자 확정 벽 총수."""
+        return sum(self._color_wall_counts().values())
+
+    def _is_color_complete(self, color):
+        """그 색이 목표 수(per_color_target)만큼 색+숫자 벽을 이미 확보 → 더 접근/인식 안 함.
+        매번 파일 읽지 않게 3s 캐시."""
+        if self.per_color_target <= 0:
+            return False
+        if self._color_counts_t is None or self.elapsed(self._color_counts_t) > 3.0:
+            self._color_counts_t = self.now()
+            self._color_counts = self._color_wall_counts()
+        return self._color_counts.get(color, 0) >= self.per_color_target
+
+    def _finish_phase1(self, reason):
+        """2-pass: Phase1(탐사+색좌표) 완료 — 주행 멈추고 /phase1_done 발행.
+        품질 게이트/재탐사 안 함(숫자는 Phase2 가 정면 방문해 채운다). 노드는 idle 로 살아있어
+        Nav2 가 cmd_vel 을 잡고 digit_finalizer 가 동작하게 둔다(여기서 종료 안 함)."""
+        self.pub.publish(Twist())
+        self._phase1_done = True
+        self.publish_phase('PHASE1_DONE')
+        self.pub_phase1_done.publish(Bool(data=True))
+        self.get_logger().info(
+            f'=== {reason} → Phase1 완료, /phase1_done 발행 (방문셀 {len(self.visited)}) '
+            f'→ Phase2(정면 방문·숫자 확정) 대기 ===')
 
     def complete_or_continue(self, reason):
         """자연 종료 시점의 품질 게이트. 기준 충족이면 종료, 미달이면 재탐사(상한까지),
         상한 도달이면 경고와 함께 그대로 종료. (시간 상한은 별도 안전망.)"""
+        if self.two_pass:                         # 2-pass: 종료 대신 Phase1 완료 신호
+            self._finish_phase1(reason)
+            return
         if self.min_quality_walls <= 0:
             self.stop_and_quit(reason)            # 게이트 비활성 → 기존 동작
             return

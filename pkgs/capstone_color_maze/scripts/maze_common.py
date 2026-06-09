@@ -196,6 +196,12 @@ def cluster_cells(cells, merge_dist=MERGE_DIST):
         entry = {'x': cx, 'y': cy, 'votes': tv}
         if cells_with_digit:
             entry['digit'] = max(cells_with_digit, key=lambda c: c['votes'])['digit']
+        # 시점방향(법선): 표 가중 평균 후 단위화 → Phase2 정면접근 방향
+        nx = sum(c.get('nx', 0.0) * c['votes'] for c in g)
+        ny = sum(c.get('ny', 0.0) * c['votes'] for c in g)
+        mag = math.hypot(nx, ny)
+        if mag > 1e-6:
+            entry['nx'], entry['ny'] = nx / mag, ny / mag
         out.append(entry)
     return out
 
