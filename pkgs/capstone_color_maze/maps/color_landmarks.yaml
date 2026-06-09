@@ -1,7 +1,21 @@
-RED:
-- x: 1.95
-  y: 0.15
-  votes: 10
-  digit: 2
+RED: []
 GREEN: []
-BLUE: []
+BLUE:
+- x: 2.85
+  y: 1.95
+  votes: 243
+  digit: 3
+  nx: -0.695
+  ny: -0.719
+- x: 2.55
+  y: 1.95
+  votes: 17
+  digit: 3
+  nx: -0.277
+  ny: -0.961
+- x: 2.55
+  y: 2.25
+  votes: 21
+  digit: 3
+  nx: 0.048
+  ny: -0.999
