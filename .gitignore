@@ -9,3 +9,4 @@ __pycache__/
 *.pt
 *.db3
 *.bag
+*:Zone.Identifier
