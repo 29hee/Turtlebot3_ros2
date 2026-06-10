@@ -68,6 +68,10 @@ def generate_launch_description():
     # 탐사 종료 시 점유격자맵을 저장할 경로(확장자 없이). 런타임 기본맵과 '같은 이름'으로
     #   덮어써, 방금 만든 점유맵 + color_landmarks.yaml 이 같은 SLAM 좌표 한 쌍이 되게 한다.
     map_save = LaunchConfiguration('map_save', default=os.path.join(pkg, 'maps', 'color_room'))
+    # 색 랜드마크(color_landmarks.yaml) 저장 경로. color_mapper 로 전달한다. map_save(점유맵)와
+    #   '짝'이 되도록 같은 베이스 이름으로 주는 것을 권장(런타임 bringup 이 map/landmarks 를 함께 받음).
+    landmarks_save = LaunchConfiguration(
+        'landmarks_save', default=os.path.join(pkg, 'maps', 'color_landmarks.yaml'))
     # 매핑 종료 품질 게이트: 자연 종료 시 색+숫자 벽이 이 수 미만이면 재탐사(0=끔).
     min_walls = LaunchConfiguration('min_walls', default='1')
 
@@ -77,10 +81,17 @@ def generate_launch_description():
     #   gzserver/gzclient/spawn/robot_state_publisher 를 띄우지 않는다(이게 켜지면 실로봇 TF 와
     #   충돌해 TF_OLD_DATA 폭주). 로봇 bringup(Pi)이 /scan·TF·odom 을, image_upright(PC)가
     #   /camera/image_raw 를 제공한다.
+    # ★ slam_params_file 로 우리 매핑 설정을 넘긴다(안 넘기면 slam_toolbox 기본값 → map_update_interval
+    #   이 길어 RViz 에서 '누적 중인 맵'이 거의 안 보인다). slam_mapping.yaml 이 1s 주기로 /map 을
+    #   재발행하도록 잡아 실시간 누적이 보이게 한다.
+    slam_params = os.path.join(pkg, 'config', 'slam_mapping.yaml')
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(slam_toolbox, 'launch', 'online_async_launch.py')),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
+        launch_arguments={
+            'use_sim_time': use_sim_time,
+            'slam_params_file': slam_params,
+        }.items(),
     )
 
     # 색 라벨 누적(격자 투표 → color_landmarks.yaml)을 돕는 탐사 주행.
@@ -123,7 +134,8 @@ def generate_launch_description():
     )
     # color_mapper 는 '색+숫자 둘 다' 인식된 칸만 저장(무조건) → digit_recognizer 가 필수다.
     mapper_proc = ExecuteProcess(
-        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time]],
+        cmd=['python3', color_mapper, '--ros-args', '-p', ['use_sim_time:=', use_sim_time],
+             '-p', ['save_path:=', landmarks_save]],
         condition=IfCondition(explore), output='screen',
     )
     # 매핑 중 라이브 품질 체크리스트(색별 벽수/digit/누락 경고).
@@ -184,6 +196,8 @@ def generate_launch_description():
                               description='탐사 시간 상한[s] (종료는 미방문 소진이 우선)'),
         DeclareLaunchArgument('map_save', default_value=os.path.join(pkg, 'maps', 'color_room'),
                               description='탐사 종료 시 점유격자맵 저장 경로(확장자 없이)'),
+        DeclareLaunchArgument('landmarks_save', default_value=os.path.join(pkg, 'maps', 'color_landmarks.yaml'),
+                              description='색 랜드마크 저장 경로(.yaml). map_save 와 짝이 되게 같은 베이스 이름 권장'),
         DeclareLaunchArgument('min_walls', default_value='1',
                               description='매핑 종료 품질 게이트: 색+숫자 벽 최소수(미달이면 재탐사, 0=끔)'),
         guard_proc, guard_handler,

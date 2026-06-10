@@ -35,19 +35,20 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
-from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
 
 import yaml
 import tf2_ros
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Quaternion, Twist, PoseWithCovarianceStamped
-from std_msgs.msg import Bool, Int32, String
+from std_msgs.msg import Bool, Int32, String, Float32, Float32MultiArray
+from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Empty
 from nav2_msgs.action import NavigateToPose
 
 from maze_common import (
     normalize_color, parse_target, approach_pose, order_walls, resolve_target_walls,
-    CONFIRM_THRESHOLD,
+    color_to_id, CONFIRM_THRESHOLD,
 )
 
 # 로그용 한국어 색 이름 ("빨강 3번에 도착했습니다")
@@ -75,7 +76,9 @@ class MazeTour(Node):
         # false: 순회 후 다시 /target_color 대기(연속 서비스/bringup 용).
         self.declare_parameter('oneshot', False)
         self.declare_parameter('landmarks_path', default_landmarks_path())
-        self.declare_parameter('standoff', 0.45)        # 벽 앞 정지 거리 [m]
+        # 벽 앞 Nav2 정지 거리 [m]. 정면접근(visual servo)이 여기서부터 전방가드(0.5m)까지
+        # 더 다가가며 점유율을 올리므로, standoff 는 가드보다 충분히 멀어야 전진 여유가 생긴다.
+        self.declare_parameter('standoff', 0.70)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('confirm_window', 4.0)   # 도착 후 확인 관측 시간 [s]
@@ -83,21 +86,65 @@ class MazeTour(Node):
         self.declare_parameter('confirm_retries', 2)         # 확인 실패 시 '뒤로+재확인' 반복 횟수
         self.declare_parameter('confirm_backup_speed', 0.07) # 뒤로 물러나는 속도 [m/s]
         self.declare_parameter('confirm_backup_secs', 1.5)   # 뒤로 물러나는 시간 [s] (~0.1m, 화각 확보)
+        self.declare_parameter('dwell_secs', 10.0)           # 타겟 앞 정지 관찰 시간 [s] (인식 무관 머묾)
+        self.declare_parameter('map_margin', 0.8)            # 랜드마크 bbox + 이 여유 밖이면 '맵 밖' → 중앙 재시드 [m]
+        # ── 정면 정렬·전진(visual servo) ─────────────────────────────
+        # 도착 후 Nav2 가 세워준 포즈가 비스듬하면 색 패널을 '옆에서' 봐 점유율이 낮다.
+        # /color_signal 의 cx 로 정면을 맞추며, target 색의 '화면 전체(full-frame) 점유율'
+        # (/target_coverage)이 approach_coverage(목표) 이상이 될 때까지 천천히 전진해
+        # '정면에서 꽉 차게' 만든다. detect 임계는 '색이 보이기 시작'하는 하한 —
+        # 그 아래면 전진 대신 탐색 회전으로 색을 화면에 잡는다.
+        self.declare_parameter('approach_coverage', 0.50)    # 전체프레임 점유율 목표(도달 시 정지) [0~1]
+        self.declare_parameter('approach_detect', 0.05)      # 전체프레임 이 점유율 이상이면 '감지'→전진(이하=탐색 회전)
+        self.declare_parameter('approach_speed', 0.08)       # 전진 속도 [m/s]
+        self.declare_parameter('approach_kp', 0.6)           # cx→조향 P 게인(정면 정렬)
+        self.declare_parameter('approach_search_speed', 0.3) # 색 안 보일 때 탐색 회전 각속도 [rad/s]
+        self.declare_parameter('approach_max_secs', 8.0)     # 전진 시간 상한 [s]
+        self.declare_parameter('approach_max_advance', 0.45) # 도착점 대비 전진 거리 상한(벽 지나침 방지) [m]
+        self.declare_parameter('approach_min_range', 0.50)   # LIDAR 전방 최소거리 — 이하면 정지(충돌 방지) [m]
+        self.declare_parameter('approach_front_deg', 20.0)   # 전방 가드 섹터 반각 [deg]
+        # ── 벽 정렬(모든 타겟 도착 후, 마지막 벽에 수직 맞춤) ─────────────
+        # 전방 ±align_probe_deg 두 빔의 거리를 비교해 같아질 때까지 회전 → 평평한 벽에 수직(정면).
+        self.declare_parameter('align_on_finish', True)      # 순회 완료 후 벽 정렬 수행 여부
+        self.declare_parameter('align_probe_deg', 25.0)      # 좌우 대칭 비교 빔 각도 [deg]
+        self.declare_parameter('align_tol', 0.03)            # 좌우 거리차 허용 [m] (이하면 수직으로 봄)
+        self.declare_parameter('align_kp', 1.2)              # 거리차→각속도 P 게인
+        self.declare_parameter('align_speed', 0.4)           # 정렬 회전 최대 각속도 [rad/s]
+        self.declare_parameter('align_max_secs', 6.0)        # 정렬 시간 상한 [s]
+        # ── 측면 재정렬(옆에서 보는 문제 해결) ───────────────────────────
+        # 패널을 옆에서 보면(가로 오프셋 cx 큼), 회전만으론 정면이 안 된다. 벽과 평행하게
+        # 타겟 쪽으로 '일정거리' 이동해 패널 정면으로 들어간 뒤 다시 벽을 향해 돌아 정면으로 본다.
+        # diff-drive 라 평행이동 = 90° 회전 → 전진 → -90° 복귀. cx 가 tol 이내 될 때까지 반복.
+        self.declare_parameter('recenter_enabled', True)
+        self.declare_parameter('recenter_tol', 0.12)         # |cx| 이 이하면 '정면'으로 보고 종료
+        self.declare_parameter('recenter_step', 0.10)        # 한 번에 벽 평행으로 이동할 거리 [m]
+        self.declare_parameter('recenter_max_iters', 5)      # 평행이동 반복 상한
+        self.declare_parameter('recenter_fwd_speed', 0.08)   # 평행이동 전진 속도 [m/s]
+        self.declare_parameter('recenter_sign', 1.0)         # 카메라 좌우 반전 시 -1.0 로 뒤집기
+        self.declare_parameter('recenter_turn_tol_deg', 3.0) # 90° 회전 허용 오차 [deg]
         # 시작 시 자기위치 재추정(relocalization). SLAM 매핑 땐 불필요(위치 고정)하고,
         # 실로봇 런타임에선 켠 위치가 맵 어디인지 모르므로 true 로 켜서, 전역 파티클을
         # 흩뿌린 뒤 제자리 회전으로 AMCL 을 수렴시키고 나서 순회를 시작한다.
         # (시뮬은 set_initial_pose 가 맞으므로 기본 false 로 두어 기존 동작 보존.)
         self.declare_parameter('relocalize', False)
-        self.declare_parameter('relocalize_speed', 0.5)      # 회전 각속도 [rad/s]
+        # 회전 각속도 [rad/s]. ★ 느릴수록 매 AMCL 업데이트(update_min_a=0.2rad)당 주입되는
+        #   yaw 불확실성이 작아 'yaw 공분산 plateau'가 낮아진다 → 더 엄격한 yaw 임계까지 수렴 가능.
+        #   (0.5→0.4 로 낮춰 plateau 를 끌어내림. 대신 같은 바퀴수에 시간이 더 걸림.)
+        self.declare_parameter('relocalize_speed', 0.4)
         # 고정 바퀴수가 아니라 'AMCL 공분산이 임계 이하로 수렴할 때까지' 회전한다.
         # relocalize_max_turns 는 수렴 못 할 때를 대비한 안전 상한(무한회전 방지).
-        # 임계는 실측 기반: 전역분산 후 ~20s(±1.6바퀴) 회전하면 pos_std~0.17m,
-        # yaw_std~0.28rad 에서 평탄화한다(회전 중엔 모션모델이 yaw 불확실성을 계속
-        # 주입해 그 아래로는 안 내려감). 그 plateau 바로 위로 임계를 잡아 '수렴 도달'을
-        # 판정한다. (더 빡빡하게 잡으면 영원히 트립 못 하고 상한까지 헛돈다 — 실측 확인.)
-        self.declare_parameter('relocalize_max_turns', 3.0)  # 최대 회전 바퀴 수(상한)
-        self.declare_parameter('relocalize_pos_std', 0.25)   # 위치 표준편차 임계 [m]
-        self.declare_parameter('relocalize_yaw_std', 0.35)   # yaw 표준편차 임계 [rad]
+        # ※ AMCL 은 update_min_d=0.25m / update_min_a=0.2rad 이상 '움직일 때만' 필터를 갱신한다
+        #   (정지 상태에선 공분산이 안 줄어듦). 그래서 수렴은 '회전 중'에만 진행된다.
+        # ★ 엄격화: 회전 plateau(@0.4rad/s) 바로 위로 임계를 더 조였다(pos 0.25→0.18, yaw 0.35→0.26).
+        #   plateau 에 가까울수록 트립이 빡빡해지므로, max_turns 여유(3→5)와 지속시간(1.5→3.0s)을
+        #   함께 키워 '진짜로 좁아졌을 때만' 통과시킨다. 상한까지 미달이면 경고 후 진행(무한회전 방지).
+        #   너무 빡빡해 매번 상한까지 헛돌면 임계를 0.20/0.30 정도로 살짝 푸는 것을 권장.
+        self.declare_parameter('relocalize_max_turns', 5.0)  # 최대 회전 바퀴 수(상한)
+        self.declare_parameter('relocalize_pos_std', 0.18)   # 위치 표준편차 임계 [m] (엄격)
+        self.declare_parameter('relocalize_yaw_std', 0.26)   # yaw 표준편차 임계 [rad] (엄격)
+        # 임계 아래로 '한 번 튄' 샘플에 속아 조기 종료하지 않도록, 임계 이하가 이 시간만큼
+        # '연속 유지'돼야 수렴으로 인정한다(대칭 미로에서 확신하지만 틀린 수렴 줄임).
+        self.declare_parameter('relocalize_settle_secs', 3.0)
         self.declare_parameter('goto_center', True)          # 위치추정 시 맵 중앙으로 실제 주행 후 재수렴
 
         init_color, init_digit = parse_target(self.get_parameter('target_color').value)
@@ -113,12 +160,37 @@ class MazeTour(Node):
         self.confirm_retries = int(self.get_parameter('confirm_retries').value)
         self.confirm_backup_speed = float(self.get_parameter('confirm_backup_speed').value)
         self.confirm_backup_secs = float(self.get_parameter('confirm_backup_secs').value)
+        self.dwell_secs = float(self.get_parameter('dwell_secs').value)
+        self.map_margin = float(self.get_parameter('map_margin').value)
+        self.approach_coverage = float(self.get_parameter('approach_coverage').value)
+        self.approach_detect = float(self.get_parameter('approach_detect').value)
+        self.approach_speed = float(self.get_parameter('approach_speed').value)
+        self.approach_kp = float(self.get_parameter('approach_kp').value)
+        self.approach_search_speed = float(self.get_parameter('approach_search_speed').value)
+        self.approach_max_secs = float(self.get_parameter('approach_max_secs').value)
+        self.approach_max_advance = float(self.get_parameter('approach_max_advance').value)
+        self.approach_min_range = float(self.get_parameter('approach_min_range').value)
+        self.approach_front_deg = float(self.get_parameter('approach_front_deg').value)
+        self.align_on_finish = bool(self.get_parameter('align_on_finish').value)
+        self.align_probe_deg = float(self.get_parameter('align_probe_deg').value)
+        self.align_tol = float(self.get_parameter('align_tol').value)
+        self.align_kp = float(self.get_parameter('align_kp').value)
+        self.align_speed = float(self.get_parameter('align_speed').value)
+        self.align_max_secs = float(self.get_parameter('align_max_secs').value)
+        self.recenter_enabled = bool(self.get_parameter('recenter_enabled').value)
+        self.recenter_tol = float(self.get_parameter('recenter_tol').value)
+        self.recenter_step = float(self.get_parameter('recenter_step').value)
+        self.recenter_max_iters = int(self.get_parameter('recenter_max_iters').value)
+        self.recenter_fwd_speed = float(self.get_parameter('recenter_fwd_speed').value)
+        self.recenter_sign = float(self.get_parameter('recenter_sign').value)
+        self.recenter_turn_tol_deg = float(self.get_parameter('recenter_turn_tol_deg').value)
         self.relocalize = bool(self.get_parameter('relocalize').value)
         self.goto_center = bool(self.get_parameter('goto_center').value)
         self.relocalize_speed = float(self.get_parameter('relocalize_speed').value)
         self.relocalize_max_turns = float(self.get_parameter('relocalize_max_turns').value)
         self.relocalize_pos_std = float(self.get_parameter('relocalize_pos_std').value)
         self.relocalize_yaw_std = float(self.get_parameter('relocalize_yaw_std').value)
+        self.relocalize_settle_secs = float(self.get_parameter('relocalize_settle_secs').value)
 
         # ── 상태/IO ───────────────────────────────────────────────
         self._confirmed_now = False        # /target_confirmed 최신값
@@ -132,8 +204,20 @@ class MazeTour(Node):
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.create_subscription(Bool, '/target_confirmed', self._on_confirmed, 10)
         self.create_subscription(Int32, '/detected_digit', self._on_digit, 10)
+        # 정면 정렬·전진용: 점유율 게이트는 화면 전체 기준(/target_coverage, color_confirm),
+        # 좌우 정렬(cx)은 vision_node 의 /color_signal[ color_id, cx_norm, coverage ] 사용.
+        self._full_cov = 0.0     # target 색 '화면 전체' 점유율(color_confirm)
+        self._color_cx = 0.0     # target 색 blob 중심 x(-1 왼쪽 ~ +1 오른쪽)
+        self._cx_stamp = 0.0     # _color_cx 가 target 색으로 갱신된 마지막 시각(신선도)
+        self._scan_front = float('inf')   # LIDAR 전방 섹터 최소거리 [m]
+        self._scan_msg = None    # 최신 LaserScan(벽 정렬에서 특정 각도 빔 조회용)
+        self.create_subscription(Float32, '/target_coverage', self._on_coverage, 10)
+        self.create_subscription(Float32MultiArray, '/color_signal', self._on_signal, 10)
+        self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
         # relocalization 용: 제자리 회전 명령 + AMCL 전역 재초기화 서비스 + 공분산 모니터
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.init_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
+        self._seed_center = (0.0, 0.0)   # 맵 중앙(무적 재시드 기준)
         self.global_loc = self.create_client(Empty, '/reinitialize_global_localization')
         self._amcl_cov = None   # 최신 /amcl_pose 공분산(36) — 수렴 판정용
         self.create_subscription(
@@ -157,6 +241,37 @@ class MazeTour(Node):
     def _on_amcl(self, msg):
         self._amcl_cov = msg.pose.covariance   # 길이 36 (행우선 6x6)
 
+    def _on_coverage(self, msg):
+        """color_confirm /target_coverage = target 색의 '화면 전체' 점유율(0~1). 전진 게이트용."""
+        self._full_cov = float(msg.data)
+
+    def _on_signal(self, msg):
+        """vision_node /color_signal = [color_id, cx_norm, coverage]. 좌우 정렬용 cx 만 취한다.
+        우세색이 현재 target 색일 때만 cx 갱신(아니면 마지막 본 방향 유지 → 탐색 회전에 활용)."""
+        if len(msg.data) < 3:
+            return
+        if self.target is not None and int(msg.data[0]) == color_to_id(self.target):
+            self._color_cx = float(msg.data[1])
+            self._cx_stamp = time.time()   # cx 신선도(측면정렬에서 미검출 구분용)
+
+    def _on_scan(self, msg):
+        """전방 ±approach_front_deg 섹터의 LIDAR 최소거리(유효 측정만). 충돌 방지 가드용.
+        원본 msg 도 보관(벽 정렬에서 특정 각도 빔 거리 조회)."""
+        self._scan_msg = msg
+        n = len(msg.ranges)
+        if n == 0:
+            return
+        half = math.radians(self.approach_front_deg)
+        best = float('inf')
+        for i in range(n):
+            ang = msg.angle_min + i * msg.angle_increment
+            ang = (ang + math.pi) % (2.0 * math.pi) - math.pi   # [-pi, pi] 정규화
+            if -half <= ang <= half:
+                r = msg.ranges[i]
+                if r == r and msg.range_min <= r < msg.range_max and r < best:  # NaN/무한/범위밖 제외
+                    best = r
+        self._scan_front = best
+
     def _on_target_color(self, msg):
         """런타임 타겟 지정. 'RED' 또는 'RED_1' 형식 모두 수신.
         다음 순회로 예약(현재 순회 중이면 끝난 뒤 처리)."""
@@ -176,6 +291,11 @@ class MazeTour(Node):
             return False
         pos_std = max(math.sqrt(max(c[0], 0.0)), math.sqrt(max(c[7], 0.0)))  # xx, yy
         yaw_std = math.sqrt(max(c[35], 0.0))                                  # yaw-yaw
+        # AMCL 이 초기화 직후 '공분산 0짜리'(아직 추정 전) /amcl_pose 를 한 번 내보내는데,
+        # 그게 0 <= 임계라 '수렴'으로 오판돼 첫 회전을 통째로 건너뛰는 버그가 있었다.
+        # → 위치·yaw 가 둘 다 사실상 0 이면 '유효한 추정 아님'으로 보고 수렴으로 치지 않는다.
+        if pos_std <= 1e-6 and yaw_std <= 1e-6:
+            return False
         return pos_std <= self.relocalize_pos_std and yaw_std <= self.relocalize_yaw_std
 
     def load_target_walls(self):
@@ -205,6 +325,21 @@ class MazeTour(Node):
                 rclpy.spin_once(self, timeout_sec=0.2)
         return None
 
+    def get_robot_yaw(self, timeout=2.0):
+        """map→base_link 의 yaw[rad]. 못 받으면 None. (제자리 회전량 측정용)"""
+        end = time.time() + timeout
+        while time.time() < end and rclpy.ok():
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    self.map_frame, self.base_frame, rclpy.time.Time())
+                q = tf.transform.rotation
+                return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                  1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException,
+                    tf2_ros.ConnectivityException):
+                rclpy.spin_once(self, timeout_sec=0.2)
+        return None
+
     def make_pose(self, x, y, yaw):
         p = PoseStamped()
         p.header.frame_id = self.map_frame
@@ -216,6 +351,7 @@ class MazeTour(Node):
 
     def nav_to(self, x, y, yaw, label):
         """navigate_to_pose 동기 호출. 도착 성공 여부 반환."""
+        self._ensure_in_map()   # ★ 무적: 출발 추정이 맵 밖이면 중앙 재시드(planner 'outside map' 차단)
         if not self.nav_client.wait_for_server(timeout_sec=10.0):
             self.get_logger().error('navigate_to_pose 액션 서버 없음 (Nav2 미실행?)')
             return False
@@ -269,20 +405,270 @@ class MazeTour(Node):
                     return True
         return true_count >= self.confirm_min_true
 
+    def _set_initial_pose(self, x, y, yaw=0.0):
+        """AMCL 초기 추정을 (x,y,yaw)에 심는다(/initialpose). 맵 안 좌표라 'outside map' 차단.
+        AMCL 이 한두 번 놓칠 수 있어 짧게 여러 번 발행.
+
+        ★ stamp 는 '0'(빈 시각)으로 둔다. PC 시각 now() 로 찍으면 odom TF(로봇/Pi 시각)와
+        클럭 skew 가 나서 AMCL 이 'extrapolation into the future' 로 초기포즈 변환에 실패하고
+        odom 보정 없이 대충 박힌다(로그의 'Failed to transform initial pose in time'). 0 으로
+        두면 AMCL 이 '최신 TF' 로 변환 → skew 무관하게 제대로 적용된다(/scan 의 scan_restamp 와 같은 취지)."""
+        for _ in range(5):
+            msg = PoseWithCovarianceStamped()
+            msg.header.frame_id = self.map_frame
+            msg.header.stamp = rclpy.time.Time().to_msg()   # 0: 최신 TF 사용(클럭 skew 무시)
+            msg.pose.pose.position.x = float(x)
+            msg.pose.pose.position.y = float(y)
+            msg.pose.pose.orientation = yaw_to_quat(yaw)
+            cov = [0.0] * 36
+            cov[0] = cov[7] = 0.25    # 위치 분산(0.5m)^2
+            cov[35] = 0.25            # yaw 분산
+            msg.pose.covariance = cov
+            self.init_pose_pub.publish(msg)
+            rclpy.spin_once(self, timeout_sec=0.1)
+        self._amcl_cov = None
+        self.get_logger().info(f'AMCL 초기포즈 심음 @({x:.2f},{y:.2f}) — 절대 맵 밖 아님')
+
+    def _map_bbox(self):
+        """랜드마크 전체의 (xmin,ymin,xmax,ymax). 없으면 None."""
+        try:
+            with open(self.landmarks_path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            return None
+        xs, ys = [], []
+        for walls in data.values():
+            for w in (walls or []):
+                if 'x' in w and 'y' in w:
+                    xs.append(float(w['x'])); ys.append(float(w['y']))
+        if not xs:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _ensure_in_map(self):
+        """★ 무적 가드: 로봇 추정이 맵(랜드마크 bbox+여유) 밖으로 발산하면 중앙으로 강제 재시드.
+        ('절대 맵 밖일 수 없다' — RViz 로 옮겨도 다시 발산하는 경우 자동 복구.)"""
+        bb = self._map_bbox()
+        here = self.get_robot_xy(timeout=1.0)
+        if bb is None or here is None:
+            return
+        m = self.map_margin
+        if not (bb[0] - m <= here[0] <= bb[2] + m and bb[1] - m <= here[1] <= bb[3] + m):
+            self.get_logger().warn(
+                f'로봇 추정({here[0]:.1f},{here[1]:.1f})이 맵 밖 — 중앙 재시드(무적 복구)')
+            self._set_initial_pose(self._seed_center[0], self._seed_center[1], 0.0)
+            self._spin_to_converge()
+
+    def visual_approach(self):
+        """도착 후 '정면 정렬 + 전진'(visual servo). Nav2 가 세워준 포즈가 비스듬해
+        패널을 옆에서 보면 점유율이 낮으므로, /color_signal 의 cx 로 정면을 맞추며
+        target 색의 '화면 전체' 점유율이 approach_coverage(목표) 이상이 될 때까지 전진한다.
+
+        안전 종료:
+          - 점유율 목표 도달
+          - LIDAR 전방 최소거리 ≤ approach_min_range (벽 코앞 → 충돌 방지)
+          - 도착점 대비 전진거리 ≥ approach_max_advance (벽 지나침 방지)
+          - 시간 상한 approach_max_secs
+        색이 approach_detect 미만이면(거의 안 보임) 전진을 멈추고 마지막 cx 방향으로
+        탐색 회전해 색을 화면에 다시 잡는다. 반환: 종료 시 점유율이 목표 이상이면 True."""
+        start = self.get_robot_xy(timeout=2.0)
+        twist = Twist()
+        t_end = time.time() + self.approach_max_secs
+        reason = '시간 상한'
+        self.get_logger().info(
+            f'  정면 정렬·전진 — 전체프레임 점유율 {self.approach_coverage:.0%} 목표 '
+            f'(감지 {self.approach_detect:.0%}, 전방가드 {self.approach_min_range:.2f}m)')
+        while time.time() < t_end and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.05)
+            cov = self._full_cov
+            if cov >= self.approach_coverage:
+                reason = f'점유율 도달({cov:.0%})'
+                break
+            if self._scan_front <= self.approach_min_range:
+                reason = f'LIDAR 근접({self._scan_front:.2f}m)'
+                break
+            here = self.get_robot_xy(timeout=0.3)
+            if (start and here and
+                    math.hypot(here[0] - start[0], here[1] - start[1]) >= self.approach_max_advance):
+                reason = '전진거리 상한'
+                break
+            if cov >= self.approach_detect:
+                # 색이 보임 → cx 로 정면 정렬하며 전진(blob 오른쪽이면 우회전)
+                twist.linear.x = self.approach_speed
+                twist.angular.z = -self.approach_kp * self._color_cx
+            else:
+                # 색이 거의 안 보임 → 전진 멈추고 마지막 본 방향으로 탐색 회전
+                twist.linear.x = 0.0
+                twist.angular.z = -math.copysign(self.approach_search_speed, self._color_cx)
+            self.cmd_pub.publish(twist)
+        self.cmd_pub.publish(Twist())   # 정지
+        ok = self._full_cov >= self.approach_coverage
+        self.get_logger().info(f'  정면접근 종료({reason}) — 전체프레임 점유율 {self._full_cov:.0%}')
+        return ok
+
+    def _range_at(self, msg, angle):
+        """전방=0 기준 angle[rad] 빔의 유효 거리(주변 ±1빔 중 최소로 노이즈 완화). 없으면 inf."""
+        i = int(round((angle - msg.angle_min) / msg.angle_increment))
+        n = len(msg.ranges)
+        best = float('inf')
+        for di in (-1, 0, 1):
+            j = i + di
+            if 0 <= j < n:
+                r = msg.ranges[j]
+                if r == r and msg.range_min <= r < msg.range_max and r < best:
+                    best = r
+        return best
+
+    def align_to_wall(self):
+        """전방 벽에 '수직'이 되도록 제자리 회전(정면 보기). 전방 ±align_probe_deg 두 빔
+        거리가 같아지면 평평한 벽에 수직이다. 좌우 거리차로 P 제어해 균형을 맞춘다.
+        벽이 안 잡히거나 시간 상한이면 그대로 종료. (모든 타겟 도착 후 마지막 벽에서 호출.)"""
+        probe = math.radians(self.align_probe_deg)
+        twist = Twist()
+        end = time.time() + self.align_max_secs
+        reason = '시간 상한'
+        while time.time() < end and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.05)
+            msg = self._scan_msg
+            if msg is None:
+                continue
+            rl = self._range_at(msg, +probe)   # 좌측(+, CCW) 빔
+            rr = self._range_at(msg, -probe)   # 우측(-, CW) 빔
+            if not (math.isfinite(rl) and math.isfinite(rr)):
+                reason = '벽 미검출'
+                break
+            diff = rl - rr                     # >0: 좌측이 더 멂(=좌로 틀어짐) → 우회전 필요
+            if abs(diff) <= self.align_tol:
+                reason = f'수직 정렬(Δ={diff*100:.1f}cm)'
+                break
+            wz = -self.align_kp * diff
+            twist.angular.z = max(-self.align_speed, min(self.align_speed, wz))
+            self.cmd_pub.publish(twist)
+        self.cmd_pub.publish(Twist())   # 정지
+        self.get_logger().info(f'  벽 정렬 종료({reason})')
+
+    def _rotate_by(self, dyaw):
+        """제자리에서 dyaw[rad] 만큼 회전(부호=방향). TF yaw 피드백으로 닫힌 루프."""
+        y0 = self.get_robot_yaw()
+        if y0 is None:
+            return
+        target = y0 + dyaw
+        tol = math.radians(self.recenter_turn_tol_deg)
+        twist = Twist()
+        end = time.time() + 8.0
+        while time.time() < end and rclpy.ok():
+            cur = self.get_robot_yaw(timeout=0.3)
+            if cur is None:
+                rclpy.spin_once(self, timeout_sec=0.05); continue
+            err = math.atan2(math.sin(target - cur), math.cos(target - cur))
+            if abs(err) <= tol:
+                break
+            wz = max(-self.align_speed, min(self.align_speed, 1.5 * err))
+            # 너무 느려 멈추지 않게 최소 각속도 보장
+            if abs(wz) < 0.15:
+                wz = math.copysign(0.15, err)
+            twist.angular.z = wz
+            self.cmd_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.05)
+        self.cmd_pub.publish(Twist())
+
+    def _drive_forward(self, dist):
+        """직진으로 dist[m] 만큼 전진(부호=방향). TF 위치 피드백으로 닫힌 루프.
+        전방 LIDAR 가드(approach_min_range)도 함께 적용(전진 시 벽 충돌 방지)."""
+        start = self.get_robot_xy(timeout=2.0)
+        if start is None:
+            return
+        twist = Twist()
+        end = time.time() + 8.0
+        while time.time() < end and rclpy.ok():
+            here = self.get_robot_xy(timeout=0.3)
+            if here and math.hypot(here[0] - start[0], here[1] - start[1]) >= abs(dist):
+                break
+            if dist > 0 and self._scan_front <= self.approach_min_range:
+                self.get_logger().info(f'    전진 가드(LIDAR {self._scan_front:.2f}m) — 중단')
+                break
+            twist.linear.x = math.copysign(self.recenter_fwd_speed, dist)
+            self.cmd_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.05)
+        self.cmd_pub.publish(Twist())
+
+    def _fresh_cx(self, secs=0.6):
+        """secs 동안 스핀하며 최신 target 색 cx 를 읽는다. 그 사이 target 색이 한 번도
+        안 잡혔으면(=신선한 cx 없음) None 을 반환해 '정면(cx=0)'과 '미검출'을 구분한다."""
+        t0 = time.time()
+        end = t0 + secs
+        while time.time() < end and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.05)
+        return self._color_cx if self._cx_stamp >= t0 else None
+
+    def recenter_on_target(self):
+        """옆에서 보는 문제의 '진짜' 해결: 벽과 평행하게 타겟 쪽으로 이동(측면 정렬)해
+        패널 정면으로 들어간 뒤, 벽을 향해 돌아 정면으로 본다. cx 가 tol 이내가 될 때까지 반복.
+          1) 벽에 수직 정렬(align_to_wall)
+          2) cx(가로 오프셋) 확인 — tol 이내면 종료(이미 정면)
+          3) 타겟 쪽으로 90° 회전 → recenter_step 만큼 전진(벽 평행이동) → -90° 복귀
+          4) 다시 수직 정렬 후 2)로
+        diff-drive 라 평행이동을 회전·전진·복귀로 구현. 오프셋이 오히려 커지면(부호 반대)
+        recenter_sign 으로 뒤집을 수 있고, 한 번 악화하면 중단해 발산을 막는다."""
+        if not self.recenter_enabled:
+            return
+        self.align_to_wall()
+        prev_abs = None
+        for it in range(self.recenter_max_iters):
+            cx = self._fresh_cx()
+            if cx is None:
+                self.get_logger().info('  측면정렬: 타겟색 미검출 — 중단')
+                return
+            if abs(cx) <= self.recenter_tol:
+                self.get_logger().info(f'  측면정렬 완료 — 정면(cx={cx:+.2f})')
+                return
+            if prev_abs is not None and abs(cx) > prev_abs + 0.05:
+                self.get_logger().info(
+                    f'  측면정렬: 오프셋 악화(cx={cx:+.2f}) — 중단(부호 의심 시 recenter_sign 뒤집기)')
+                return
+            prev_abs = abs(cx)
+            # cx<0=타겟 좌측 → 좌로 평행이동(+90° CCW). recenter_sign 으로 좌우 반전 보정.
+            turn = math.copysign(math.pi / 2.0, -cx * self.recenter_sign)
+            self.get_logger().info(
+                f'  측면정렬 {it+1}/{self.recenter_max_iters}: cx={cx:+.2f} → '
+                f'벽 평행 {self.recenter_step:.2f}m {"좌" if turn > 0 else "우"}로 이동')
+            self._rotate_by(turn)
+            self._drive_forward(self.recenter_step)
+            self._rotate_by(-turn)
+            self.align_to_wall()
+        self.get_logger().info('  측면정렬 반복 상한 — 그대로 진행')
+
+    def dwell_observe(self, secs):
+        """secs 동안 '정지'한 채 확인 신호를 관찰(조기 종료 없이 전체 시간 머묾).
+        인식되든 안 되든 그 앞에 머물다 이동하기 위함. 확인되면 True."""
+        self.cmd_pub.publish(Twist())   # 정지 유지
+        self._confirmed_now = False
+        seen = 0
+        need_live_digit = (self.target_digit is not None and not self.target_digit_known)
+        end = time.time() + secs
+        while time.time() < end and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.1)
+            color_ok = self._confirmed_now
+            digit_ok = (not need_live_digit or self._detected_digit == self.target_digit)
+            if color_ok and digit_ok:
+                seen += 1
+        return seen >= self.confirm_min_true
+
     def relocalize_in_place(self):
         """실로봇 시작용 자기위치 재추정. AMCL 전역 파티클을 흩뿌린 뒤, 제자리에서
         'AMCL 공분산이 임계 이하로 수렴할 때까지'(상한 relocalize_max_turns) 회전한다.
         고정 바퀴수와 달리 수렴을 보장해, 이후 confirm 이 요구하는 정밀도를 맞춘다.
         (SLAM 매핑은 위치 고정이라 불필요 → 런타임/AMCL 전용.)"""
-        # 1) 전역 재초기화(서비스 있으면): 파티클을 맵 전체에 흩뿌려 잘못된 초기포즈를 버린다.
-        if self.global_loc.wait_for_service(timeout_sec=3.0):
-            self.global_loc.call_async(Empty.Request())
-            self.get_logger().info('AMCL 전역 재초기화 요청(파티클 분산)')
-            self._amcl_cov = None   # 분산 직후 옛 공분산으로 조기수렴 오판 방지
-        else:
-            self.get_logger().warn('전역 재초기화 서비스 없음 — 회전만으로 수렴 시도')
-        # 2) 제자리 회전으로 대략 수렴(거친 추정)
+        # 1) ★ '무적' 초기화: 시작 추정을 맵 중앙에 심는다(/initialpose). 전역 분산(global_localization)은
+        #    평균 추정이 맵 밖으로 튀어 planner 가 'start outside map'으로 거부 → 안 움직임.
+        #    맵 중앙은 '절대 맵 밖 아님' 보장 → 무조건 진행. 실제 위치는 이어지는 회전으로 수렴.
+        ctr = self._map_center() or (0.0, 0.0)
+        self._seed_center = ctr
+        self._set_initial_pose(ctr[0], ctr[1], 0.0)
+        # 2) 제자리 회전으로 수렴(스캔매칭 정밀화). 임계 미달이어도 '무조건 진행'.
         self._spin_to_converge()
+        # 2.5) 혹시 회전 중 발산했으면 중앙으로 복구(무적 가드)
+        self._ensure_in_map()
         # 3) ★ 맵 중앙으로 '실제 주행' 후 재수렴 — 파티클(점)만 모으지 말고 로봇이 중앙
         #    개활지로 이동해 위치추정을 다진다.
         if self.goto_center:
@@ -307,6 +693,7 @@ class MazeTour(Node):
         end = time.time() + max_dur
         converged = False
         last_log = 0.0
+        settle_start = None   # 임계 이하가 '연속 유지'되기 시작한 시각(한 번 튄 샘플 무시)
         while time.time() < end and rclpy.ok():
             self.cmd_pub.publish(twist)
             rclpy.spin_once(self, timeout_sec=0.05)
@@ -317,9 +704,16 @@ class MazeTour(Node):
                 ps = max(math.sqrt(max(c[0], 0.0)), math.sqrt(max(c[7], 0.0)))
                 ys = math.sqrt(max(c[35], 0.0))
                 self.get_logger().info(f'  수렴 중… pos_std={ps:.3f}m yaw_std={ys:.3f}rad')
+            # 임계 이하가 relocalize_settle_secs 동안 '연속' 유지돼야 수렴 인정.
+            # (초기화 직후 가짜 0 이나 한 프레임 튄 저공분산에 속아 조기 종료하던 문제 차단.)
             if self._amcl_converged():
-                converged = True
-                break
+                if settle_start is None:
+                    settle_start = now
+                elif now - settle_start >= self.relocalize_settle_secs:
+                    converged = True
+                    break
+            else:
+                settle_start = None
         self.cmd_pub.publish(Twist())   # 정지
         c = self._amcl_cov
         if converged and c is not None:
@@ -475,14 +869,18 @@ class MazeTour(Node):
                 self.get_logger().error(f'{kor} {wid}번 접근 실패')
                 failed.append((wid, '접근'))
                 continue
-            self.get_logger().info(f'{kor} {wid}번에 도착했습니다')
-            ok = self.await_confirmation()
+            self.recenter_on_target()   # 옆에서 보면 벽 평행이동으로 패널 정면 진입(+벽 수직 정렬)
+            self.visual_approach()      # 정면으로 전진해 점유율↑
+            self.get_logger().info(f'{kor} {wid}번 도착 — {self.dwell_secs:.0f}s 정지 관찰(인식 무관 머묾)')
+            ok = self.dwell_observe(self.dwell_secs)
             tries = 0
             while not ok and tries < self.confirm_retries:
                 tries += 1
                 self.get_logger().info(
                     f'{kor} {wid}번 확인 실패 → 조금 뒤로 물러나 카메라 재확보 ({tries}/{self.confirm_retries})')
                 self._nudge_back()
+                self.recenter_on_target()   # 물러난 뒤 측면정렬로 정면 재진입
+                self.visual_approach()      # 다시 정면으로 다가가 점유율 회복
                 ok = self.await_confirmation()
             if ok:
                 self.get_logger().info(f'{kor} {wid}번 확인({CONFIRM_THRESHOLD:.0%} 이상)')
@@ -520,6 +918,12 @@ class MazeTour(Node):
         if math.hypot(here[0] - ax, here[1] - ay) > 0.3:
             self.get_logger().info(f'마지막 확인 벽({kor} {last_id}번)으로 복귀 후 정지')
             self.nav_to(ax, ay, yaw, f'{kor} {last_id}번')
+
+        # ★ 모든 타겟 도착 후: 마지막 벽에 정면(수직)으로 자세 정렬하고 정지.
+        if self.align_on_finish:
+            self.get_logger().info(f'마지막 벽({kor} {last_id}번)에 정면 정렬(벽 정렬)')
+            self.recenter_on_target()   # 옆으로 치우쳤으면 벽 평행이동으로 정면 진입
+            self.align_to_wall()        # 벽에 수직으로 자세 맞춤
 
         self.pub_done.publish(Bool(data=True))
         self.get_logger().info(

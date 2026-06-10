@@ -1,0 +1,23 @@
+RED: []
+GREEN:
+- x: -0.15
+  y: 2.25
+  votes: 124
+  digit: 2
+- x: -3.45
+  y: 1.95
+  votes: 176
+  digit: 1
+- x: -3.45
+  y: -1.05
+  votes: 141
+  digit: 3
+BLUE:
+- x: -1.35
+  y: 2.85
+  votes: 120
+  digit: 3
+- x: 0.75
+  y: -0.75
+  votes: 170
+  digit: 1

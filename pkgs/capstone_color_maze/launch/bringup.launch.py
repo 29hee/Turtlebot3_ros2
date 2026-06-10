@@ -59,6 +59,14 @@ def generate_launch_description():
     params_file = LaunchConfiguration('params_file', default=default_params)
     default_landmarks = os.path.join(pkg, 'maps', 'color_landmarks.yaml')
     landmarks = LaunchConfiguration('landmarks', default=default_landmarks)
+    # 정면 정렬·전진(visual servo) 현장 튜닝값 — maze_tour 로 전달.
+    # coverage 는 '화면 전체' 기준(감지 5% → 목표 50%). 전방가드 0.5m.
+    approach_coverage = LaunchConfiguration('approach_coverage', default='0.50')
+    approach_min_range = LaunchConfiguration('approach_min_range', default='0.50')
+    approach_speed = LaunchConfiguration('approach_speed', default='0.08')
+    # 측면 재정렬(옆에서 보는 문제): 벽 평행이동 1스텝 거리 / 카메라 좌우반전 보정.
+    recenter_step = LaunchConfiguration('recenter_step', default='0.10')
+    recenter_sign = LaunchConfiguration('recenter_sign', default='1.0')
 
     nav2_bringup = get_package_share_directory('nav2_bringup')
 
@@ -88,6 +96,11 @@ def generate_launch_description():
              '-p', ['use_sim_time:=', use_sim_time],
              '-p', ['relocalize:=', relocalize],
              '-p', ['landmarks_path:=', landmarks],
+             '-p', ['approach_coverage:=', approach_coverage],
+             '-p', ['approach_min_range:=', approach_min_range],
+             '-p', ['approach_speed:=', approach_speed],
+             '-p', ['recenter_step:=', recenter_step],
+             '-p', ['recenter_sign:=', recenter_sign],
              '-p', 'oneshot:=false'],
         output='screen',
     )
@@ -137,6 +150,16 @@ def generate_launch_description():
         DeclareLaunchArgument('map', default_value=default_map),
         DeclareLaunchArgument('landmarks', default_value=default_landmarks,
                               description='색 시맨틱맵(color_landmarks.yaml) 경로'),
+        DeclareLaunchArgument('approach_coverage', default_value='0.50',
+                              description='도착 후 정면 전진 목표 점유율(화면 전체 기준, 0~1). 도달하면 정지'),
+        DeclareLaunchArgument('approach_min_range', default_value='0.50',
+                              description='LIDAR 전방 최소거리[m] — 이하면 정지(벽 충돌 방지)'),
+        DeclareLaunchArgument('approach_speed', default_value='0.08',
+                              description='정면 전진 속도[m/s]'),
+        DeclareLaunchArgument('recenter_step', default_value='0.10',
+                              description='측면 재정렬(옆에서 봄) 시 벽 평행이동 1스텝 거리[m]'),
+        DeclareLaunchArgument('recenter_sign', default_value='1.0',
+                              description='측면 재정렬 좌우 방향 보정(카메라 좌우 반전이면 -1.0)'),
         DeclareLaunchArgument('params_file', default_value=default_params),
         guard_proc, guard_handler,
         gazebo,
